@@ -15,7 +15,7 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 // Email signup endpoint
-app.post('http://localhost:3000/api/subscribe', (req, res) => {
+app.post('/api/subscribe', (req, res) => {
   const { email } = req.body;
 
   if (!email || !email.includes('@')) {
@@ -36,7 +36,7 @@ app.post('http://localhost:3000/api/subscribe', (req, res) => {
 // Image upload endpoint
 const upload = multer({ dest: 'uploads/' });
 
-app.post('http://localhost:3000/api/upload-image', upload.single('image'), (req, res) => {
+app.post('/api/upload-image', upload.single('image'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({
       success: false,
