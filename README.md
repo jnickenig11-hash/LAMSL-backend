@@ -1,0 +1,44 @@
+LAMSL Backend API
+
+This small backend provides endpoints used by the LAMSL frontend during local development.
+
+Base URL: http://localhost:3000
+
+Endpoints:
+
+- GET /api/content
+  - Returns site editable content JSON (from `data/content.json`).
+
+- POST /api/update
+  - Saves content JSON. Body: full content object.
+
+- POST /api/subscribe
+  - Body: { email }
+
+- POST /api/upload-image
+  - Form field `photo` (multipart/form-data). Saves to `uploads/` and returns path.
+
+- POST /api/log-admin-action
+  - Body: { action, user, details }
+
+- GET /ef-images
+  - Returns EF (event) image metadata from `ef_images_metadata.json`.
+
+- POST /upload-ef
+  - Form field `photo` (multipart/form-data), optional `caption`. Saves to `EF_Images/` and updates metadata.
+
+- POST /remove-ef-photo
+  - Body: { filename }
+
+- POST /notify-schedule-update
+  - Body: { ... } — logs schedule notifications to `logs/notifications.log`.
+
+- POST /notify-announcement
+  - Body: { title, body } — logs announcement notifications.
+
+- POST /upload-team-photo
+  - Form fields `photo`, `team`, `division`. Saves under `teamProfile images/<division>/<team>/` and updates `team_profile_metadata.json`.
+
+Notes:
+- All logged items are appended to files in `logs/` for local inspection.
+- For Windows PowerShell, use `curl.exe` or `Invoke-RestMethod` to POST JSON.
