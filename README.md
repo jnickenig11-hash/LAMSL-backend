@@ -43,6 +43,21 @@ Notes:
 - All logged items are appended to files in `logs/` for local inspection.
 - For Windows PowerShell, use `curl.exe` or `Invoke-RestMethod` to POST JSON.
 
+Admin API key
+-------------
+Set the `ADMIN_API_KEY` environment variable on Render to the same secret value used by your admin client.
+
+Example header when calling the backend:
+
+- `x-admin-key: <secret>`
+- or `Authorization: Bearer <secret>`
+
+For browser-based admin access, set the secret locally in the browser before saving content:
+
+```js
+localStorage.setItem('LAMSL_ADMIN_KEY', '<secret>');
+```
+
 Health check
 -----------
 

@@ -8,6 +8,16 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
+function requireAdminKey(req, res, next) {
+  if (!ADMIN_API_KEY) return next();
+  const token = req.headers['x-admin-key'] || (req.headers.authorization || '').split(' ')[1];
+  if (token !== ADMIN_API_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}
+
 // Ensure required directories exist
 const uploadDir = path.join(process.cwd(), 'uploads');
 const logsDir = path.join(process.cwd(), 'logs');
@@ -52,7 +62,7 @@ app.post('/api/subscribe', (req, res) => {
 // Image upload endpoint
 const upload = multer({ dest: 'uploads/' });
 
-app.post('/api/upload-image', upload.single('image'), (req, res) => {
+app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({
       success: false,
@@ -72,7 +82,7 @@ app.post('/api/upload-image', upload.single('image'), (req, res) => {
 app.use('/uploads', express.static('uploads'));
 
 // Admin action logging endpoint
-app.post('/api/log-admin-action', (req, res) => {
+app.post('/api/log-admin-action', requireAdminKey, (req, res) => {
   const { username, action, details } = req.body;
 
   if (!username || !action) {
@@ -121,7 +131,7 @@ app.get('/api/content', (req, res) => {
   res.json(content);
 });
 
-app.post('/api/update', (req, res) => {
+app.post('/api/update', requireAdminKey, (req, res) => {
   try {
     const body = req.body || {};
     fs.writeFileSync(contentFile, JSON.stringify(body, null, 2));
@@ -157,7 +167,7 @@ app.get('/ef-images', (req, res) => {
   res.json({ success: true, images });
 });
 
-app.post('/upload-ef', uploadEf.single('photo'), (req, res) => {
+app.post('/upload-ef', requireAdminKey, uploadEf.single('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file' });
     const caption = (req.body.caption || '').toString();
@@ -172,7 +182,7 @@ app.post('/upload-ef', uploadEf.single('photo'), (req, res) => {
   }
 });
 
-app.post('/remove-ef-photo', express.json(), (req, res) => {
+app.post('/remove-ef-photo', requireAdminKey, express.json(), (req, res) => {
   try {
     const { filename } = req.body || {};
     if (!filename) return res.status(400).json({ success: false, error: 'No filename' });
@@ -187,7 +197,7 @@ app.post('/remove-ef-photo', express.json(), (req, res) => {
 });
 
 // ===== Notifications (no-op/stub) =====
-app.post('/notify-schedule-update', (req, res) => {
+app.post('/notify-schedule-update', requireAdminKey, (req, res) => {
   try {
     const payload = req.body || {};
     const ln = JSON.stringify({ ts: new Date().toISOString(), type: 'schedule-update', payload }) + '\n';
@@ -196,7 +206,7 @@ app.post('/notify-schedule-update', (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/notify-announcement', (req, res) => {
+app.post('/notify-announcement', requireAdminKey, (req, res) => {
   try {
     const payload = req.body || {};
     const ln = JSON.stringify({ ts: new Date().toISOString(), type: 'announcement', payload }) + '\n';
@@ -225,7 +235,7 @@ const teamMetaFile = path.join(process.cwd(), '..', 'team_profile_metadata.json'
 function readTeamMeta() { try { return fs.existsSync(teamMetaFile) ? JSON.parse(fs.readFileSync(teamMetaFile, 'utf8')) : {}; } catch (e) { return {}; } }
 function writeTeamMeta(m) { try { fs.writeFileSync(teamMetaFile, JSON.stringify(m, null, 2)); } catch (e) {} }
 
-app.post('/upload-team-photo', uploadTeam.single('photo'), (req, res) => {
+app.post('/upload-team-photo', requireAdminKey, uploadTeam.single('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file' });
     const team = (req.body.team || 'unknown').toString();
