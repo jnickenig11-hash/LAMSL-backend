@@ -9,6 +9,7 @@ app.use(express.json());
 app.use(cors());
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
+console.log('ADMIN_API_KEY loaded:', !!ADMIN_API_KEY);
 function requireAdminKey(req, res, next) {
   if (!ADMIN_API_KEY) return next();
   const token = req.headers['x-admin-key'] || (req.headers.authorization || '').split(' ')[1];
@@ -251,6 +252,23 @@ app.post('/upload-team-photo', requireAdminKey, uploadTeam.single('photo'), (req
   }
 });
 
+app.get('/', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>LAMSL Backend</title></head>
+<body>
+  <h1>LAMSL Backend</h1>
+  <p>This service exposes API endpoints only.</p>
+  <ul>
+    <li><a href="/health">/health</a></li>
+    <li><a href="/api/admin-health">/api/admin-health</a></li>
+    <li><a href="/api/content">/api/content</a></li>
+  </ul>
+  <p>Use the admin key for protected endpoints.</p>
+</body>
+</html>`);
+});
+
 // Health endpoint for automated checks
 app.get('/health', (req, res) => {
   try {
@@ -268,6 +286,10 @@ app.get('/health', (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+app.get('/api/admin-health', (req, res) => {
+  res.json({ adminApiKeyConfigured: !!ADMIN_API_KEY });
 });
 
 app.listen(3000, () => {
