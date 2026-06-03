@@ -241,6 +241,25 @@ app.post('/upload-team-photo', uploadTeam.single('photo'), (req, res) => {
   }
 });
 
+// Health endpoint for automated checks
+app.get('/health', (req, res) => {
+  try {
+    const checks = {
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      dirs: {
+        uploads: fs.existsSync(uploadDir),
+        efImages: fs.existsSync(efDir),
+        data: fs.existsSync(dataDir),
+        teamProfileImages: fs.existsSync(teamProfileDir)
+      }
+    };
+    res.json({ ok: true, checks });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(3000, () => {
   console.log('Backend running at http://localhost:3000');
 });

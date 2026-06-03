@@ -42,3 +42,30 @@ Endpoints:
 Notes:
 - All logged items are appended to files in `logs/` for local inspection.
 - For Windows PowerShell, use `curl.exe` or `Invoke-RestMethod` to POST JSON.
+
+Health check
+-----------
+
+A simple automated healthcheck script is provided to verify the backend is responsive.
+
+Usage:
+
+PowerShell:
+
+```powershell
+.\healthcheck.ps1
+```
+
+Bash:
+
+```bash
+./healthcheck.sh
+```
+
+Or run directly with Node:
+
+```bash
+BASE_URL=http://localhost:3000 node healthcheck.js
+```
+
+The script checks `/health`, `/api/content`, and `/ef-images` and exits with code `0` on success.
