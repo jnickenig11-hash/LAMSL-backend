@@ -62,6 +62,17 @@ function requireAdminKey(req, res, next) {
   return res.status(403).json({ success: false, error: 'Forbidden: admin login/session token or valid API key required' });
 }
 
+
+function requireTeamContentAuth(req, res, next) {
+  const token = req.headers['x-admin-key'] || getBearerToken(req);
+  if (ADMIN_API_KEY && token === ADMIN_API_KEY) return next();
+  if (verifySessionToken(token)) return next();
+  const role = String(req.headers['x-lamsl-role'] || '').toLowerCase();
+  const sessionActive = req.headers['x-lamsl-session'] === 'active';
+  if (sessionActive && ['admin', 'umpire', 'team-manager'].includes(role)) return next();
+  return res.status(403).json({ success: false, error: 'Forbidden: team manager/admin login or API key required' });
+}
+
 app.post('/api/admin-session', express.json(), (req, res) => {
   const staticSession = getStaticSession(req);
   const key = req.headers['x-admin-key'] || getBearerToken(req);
@@ -187,6 +198,70 @@ app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res
   }
 });
 
+
+function getManagedImageInfo(body = {}) {
+  const destination = getImageDestination({ body });
+  const raw = String(body.filename || body.name || body.path || body.url || '').trim();
+  const filename = path.basename(raw.replace(/\\/g, '/'));
+  if (!filename || filename === '.' || filename === '..') return null;
+  const folder = destination === 'events' ? efDir : slideshowDir;
+  const publicPrefix = destination === 'events' ? '/EFimages/' : '/SlideshowImages/';
+  return { destination, filename, folder, publicUrl: publicPrefix + filename };
+}
+
+function sameManagedImage(item, info) {
+  if (!item || !info) return false;
+  const candidates = [item.filename, item.name, item.url, item.src, item.path, item.publicUrl]
+    .filter(Boolean)
+    .map(value => path.basename(String(value).replace(/\\/g, '/')));
+  return candidates.includes(info.filename);
+}
+
+function deleteManagedImageHandler(req, res) {
+  try {
+    const info = getManagedImageInfo(req.body || {});
+    if (!info) return res.status(400).json({ success: false, error: 'Missing valid image filename/url.' });
+
+    const fullPath = path.resolve(info.folder, info.filename);
+    const allowedRoot = path.resolve(info.folder) + path.sep;
+    if (!fullPath.startsWith(allowedRoot)) return res.status(400).json({ success: false, error: 'Invalid image path.' });
+
+    const content = readContent();
+    let removedReference = false;
+    let removedFile = false;
+
+    if (info.destination === 'events') {
+      const before = Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages.length : 0;
+      content.eventFundraiserImages = (content.eventFundraiserImages || []).filter(item => !sameManagedImage(item, info));
+      removedReference = before !== content.eventFundraiserImages.length;
+      const metaBefore = readEfMeta();
+      const metaAfter = metaBefore.filter(item => !sameManagedImage(item, info));
+      if (metaAfter.length !== metaBefore.length) removedReference = true;
+      writeEfMeta(metaAfter);
+    } else {
+      const before = Array.isArray(content.slideshow) ? content.slideshow.length : 0;
+      content.slideshow = (content.slideshow || []).filter(item => !sameManagedImage(item, info));
+      removedReference = before !== content.slideshow.length;
+    }
+
+    if (fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+      removedFile = true;
+    }
+
+    content.updatedAt = new Date().toISOString();
+    writeContent(content);
+    res.json({ success: true, destination: info.destination, filename: info.filename, removedFile, removedReference, content: readContent() });
+  } catch (error) {
+    console.error('Image delete failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+app.post('/api/delete-image', requireAdminKey, express.json(), deleteManagedImageHandler);
+app.post('/api/images/delete', requireAdminKey, express.json(), deleteManagedImageHandler);
+app.post('/api/uploaded-images/delete', requireAdminKey, express.json(), deleteManagedImageHandler);
+
 // Serve uploaded images
 app.use('/uploads', express.static(uploadDir));
 app.use('/SlideshowImages', express.static(slideshowDir));
@@ -278,6 +353,9 @@ function normalizeContent(raw) {
   if (!Array.isArray(content.practiceSchedules)) content.practiceSchedules = [];
   if (!Array.isArray(content.slideshow)) content.slideshow = [];
   if (!Array.isArray(content.eventFundraiserImages)) content.eventFundraiserImages = [];
+  if (!content.rosters || typeof content.rosters !== 'object' || Array.isArray(content.rosters)) content.rosters = {};
+  if (!content.teamPlayers || typeof content.teamPlayers !== 'object' || Array.isArray(content.teamPlayers)) content.teamPlayers = {};
+  if (!content.teamPhotos || typeof content.teamPhotos !== 'object' || Array.isArray(content.teamPhotos)) content.teamPhotos = {};
   content.standings = buildStandingsFromGamesBackend(content.gameSchedules);
   if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
   if (typeof content.homepageMessage !== 'string') content.homepageMessage = '';
@@ -367,6 +445,9 @@ app.post('/api/update', requireAdminKey, (req, res) => {
       practiceSchedules: Array.isArray(incoming.practiceSchedules) ? incoming.practiceSchedules : (current.practiceSchedules || []),
       slideshow: Array.isArray(incoming.slideshow) ? incoming.slideshow : (current.slideshow || []),
       eventFundraiserImages: Array.isArray(incoming.eventFundraiserImages) ? incoming.eventFundraiserImages : (current.eventFundraiserImages || []),
+      rosters: incoming.rosters && typeof incoming.rosters === 'object' ? incoming.rosters : (current.rosters || {}),
+      teamPlayers: incoming.teamPlayers && typeof incoming.teamPlayers === 'object' ? incoming.teamPlayers : (current.teamPlayers || {}),
+      teamPhotos: incoming.teamPhotos && typeof incoming.teamPhotos === 'object' ? incoming.teamPhotos : (current.teamPhotos || {}),
       announcements: Array.isArray(incoming.announcements) ? incoming.announcements : (current.announcements || []),
       zelle: incoming.zelle && typeof incoming.zelle === 'object' ? incoming.zelle : (current.zelle || {}),
       homepageMessage: Object.prototype.hasOwnProperty.call(incoming, 'homepageMessage') ? incoming.homepageMessage : (current.homepageMessage || '')
@@ -442,10 +523,15 @@ app.post('/remove-ef-photo', requireAdminKey, express.json(), (req, res) => {
   try {
     const { filename } = req.body || {};
     if (!filename) return res.status(400).json({ success: false, error: 'No filename' });
-    const full = path.join(efDir, filename);
+    const info = getManagedImageInfo({ filename, destination: 'events' });
+    const full = path.resolve(info.folder, info.filename);
     if (fs.existsSync(full)) fs.unlinkSync(full);
-    const meta = readEfMeta().filter(i => i.name !== filename);
+    const meta = readEfMeta().filter(i => !sameManagedImage(i, info));
     writeEfMeta(meta);
+    const content = readContent();
+    content.eventFundraiserImages = (content.eventFundraiserImages || []).filter(i => !sameManagedImage(i, info));
+    content.updatedAt = new Date().toISOString();
+    writeContent(content);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -491,7 +577,7 @@ const teamMetaFile = path.join(projectRoot, 'team_profile_metadata.json');
 function readTeamMeta() { try { return fs.existsSync(teamMetaFile) ? JSON.parse(fs.readFileSync(teamMetaFile, 'utf8')) : {}; } catch (e) { return {}; } }
 function writeTeamMeta(m) { try { fs.writeFileSync(teamMetaFile, JSON.stringify(m, null, 2)); } catch (e) {} }
 
-app.post('/upload-team-photo', requireAdminKey, uploadTeam.single('photo'), (req, res) => {
+app.post('/upload-team-photo', requireTeamContentAuth, uploadTeam.single('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file' });
     const team = (req.body.team || 'unknown').toString();
@@ -507,6 +593,28 @@ app.post('/upload-team-photo', requireAdminKey, uploadTeam.single('photo'), (req
   }
 });
 
+
+
+function getTeamPhotoRecord(team) {
+  const content = readContent();
+  if (content.teamPhotos && content.teamPhotos[team]) return content.teamPhotos[team];
+  const meta = readTeamMeta();
+  const list = meta[team];
+  if (Array.isArray(list) && list.length) return list[0];
+  return null;
+}
+
+app.get('/team-profile-photo', (req, res) => {
+  const team = String(req.query.team || '').trim();
+  if (!team) return res.status(400).json({ success: false, error: 'Missing team.' });
+  res.json({ success: true, photo: getTeamPhotoRecord(team) });
+});
+
+app.get('/api/team-profile-photo', (req, res) => {
+  const team = String(req.query.team || '').trim();
+  if (!team) return res.status(400).json({ success: false, error: 'Missing team.' });
+  res.json({ success: true, photo: getTeamPhotoRecord(team) });
+});
 
 app.get('/api/team-metadata', (req, res) => {
   res.json({ success: true, teams: readTeamMeta() });
@@ -526,7 +634,7 @@ app.get('/api/rosters', (req, res) => {
   res.json({ success: true, rosters: content.rosters || {}, teamPlayers: content.teamPlayers || {} });
 });
 
-app.post('/api/rosters', requireAdminKey, (req, res) => {
+app.post('/api/rosters', requireTeamContentAuth, (req, res) => {
   try {
     const content = readContent();
     const incoming = req.body || {};
