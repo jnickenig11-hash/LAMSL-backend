@@ -95,7 +95,8 @@ const slideshowDir = path.join(persistentRoot, 'SlideshowImages');
 const logsDir = path.join(persistentRoot, 'logs');
 const efDir = path.join(persistentRoot, 'EFimages');
 const dataDir = path.join(persistentRoot, 'data');
-const teamProfileDir = path.join(persistentRoot, 'teamProfile images');
+const teamProfileDir = path.join(persistentRoot, 'TeamProfileImages');
+const legacyTeamProfileDir = path.join(persistentRoot, 'teamProfile images');
 const bundledDataDir = path.join(projectRoot, 'data');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -114,6 +115,9 @@ if (!fs.existsSync(efDir)) {
 }
 if (!fs.existsSync(teamProfileDir)) {
   fs.mkdirSync(teamProfileDir, { recursive: true });
+}
+if (!fs.existsSync(legacyTeamProfileDir)) {
+  fs.mkdirSync(legacyTeamProfileDir, { recursive: true });
 }
 
 // Email signup endpoint
@@ -273,7 +277,8 @@ app.get('/slideshow-images', (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-app.use('/teamProfile images', express.static(teamProfileDir));
+app.use('/TeamProfileImages', express.static(teamProfileDir));
+app.use('/teamProfile images', express.static(legacyTeamProfileDir));
 app.use('/EFimages', express.static(efDir));
 app.use('/EF_Images', express.static(efDir));
 
@@ -558,49 +563,97 @@ app.post('/notify-announcement', requireAdminKey, (req, res) => {
 });
 
 // ===== Team photo uploads =====
+function safeFolderSegment(value, fallback = 'unknown') {
+  const cleaned = String(value || fallback)
+    .trim()
+    .replace(/[\\/]/g, '-')
+    .replace(/[^a-zA-Z0-9 ._()-]/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+  return cleaned || fallback;
+}
+
+function normalizeTeamPhotoUrl(record) {
+  if (!record || typeof record !== 'object') return null;
+  const raw = record.url || record.path || '';
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return { ...record, url: raw, path: raw };
+  const fixed = raw.startsWith('/') ? raw : '/' + raw;
+  return { ...record, url: fixed, path: fixed };
+}
+
 const uploadTeam = multer({ storage: multer.diskStorage({
   destination: (req, file, cb) => {
-    const team = (req.body.team || 'unknown').toString();
-    const division = (req.body.division || '').toString();
-    const folder = path.join(teamProfileDir, division || 'Misc', team || 'unknown');
-    fs.mkdirSync(folder, { recursive: true });
-    cb(null, folder);
+    try {
+      const team = safeFolderSegment(req.body.team || req.query.team, 'unknown');
+      const division = safeFolderSegment(req.body.division || req.query.division, 'Misc');
+      const folder = path.join(teamProfileDir, division, team);
+      fs.mkdirSync(folder, { recursive: true });
+      cb(null, folder);
+    } catch (error) {
+      cb(error);
+    }
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '';
-    const name = `${Date.now()}${ext}`;
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+    const name = `team-photo-${Date.now()}${ext}`;
     cb(null, name);
   }
 })});
 
-const teamMetaFile = path.join(projectRoot, 'team_profile_metadata.json');
+const teamMetaFile = path.join(dataDir, 'team_profile_metadata.json');
 function readTeamMeta() { try { return fs.existsSync(teamMetaFile) ? JSON.parse(fs.readFileSync(teamMetaFile, 'utf8')) : {}; } catch (e) { return {}; } }
 function writeTeamMeta(m) { try { fs.writeFileSync(teamMetaFile, JSON.stringify(m, null, 2)); } catch (e) {} }
 
-app.post('/upload-team-photo', requireTeamContentAuth, uploadTeam.single('photo'), (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ success: false, error: 'No file' });
-    const team = (req.body.team || 'unknown').toString();
-    const division = (req.body.division || '').toString();
-    const relFolder = path.join('teamProfile images', division || 'Misc', team || 'unknown').replace(/\\/g, '/');
-    const meta = readTeamMeta();
-    meta[team] = meta[team] || [];
-    meta[team].unshift({ filename: req.file.filename, folder: relFolder, path: path.join(relFolder, req.file.filename).replace(/\\/g, '/') });
-    writeTeamMeta(meta);
-    res.json({ success: true, folder: path.join(division || 'Misc', team || 'unknown').replace(/\\/g, '/'), filename: req.file.filename, path: path.join(relFolder, req.file.filename).replace(/\\/g, '/') });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
+function handleTeamPhotoUpload(req, res) {
+  uploadTeam.single('photo')(req, res, (uploadError) => {
+    try {
+      if (uploadError) {
+        return res.status(400).json({ success: false, error: uploadError.message || 'Team photo upload failed.' });
+      }
+      if (!req.file) return res.status(400).json({ success: false, error: 'No team photo file was received. Use form field name "photo".' });
+      const team = safeFolderSegment(req.body.team || req.query.team, 'unknown');
+      const division = safeFolderSegment(req.body.division || req.query.division, 'Misc');
+      const publicFolder = `/TeamProfileImages/${encodeURIComponent(division)}/${encodeURIComponent(team)}`;
+      const relPath = `${publicFolder}/${encodeURIComponent(req.file.filename)}`;
+      const record = {
+        team,
+        division,
+        filename: req.file.filename,
+        folder: `TeamProfileImages/${division}/${team}`,
+        path: relPath,
+        url: relPath,
+        uploadedAt: new Date().toISOString()
+      };
 
+      const meta = readTeamMeta();
+      meta[team] = Array.isArray(meta[team]) ? meta[team] : [];
+      meta[team].unshift(record);
+      writeTeamMeta(meta);
+
+      const content = readContent();
+      content.teamPhotos = content.teamPhotos && typeof content.teamPhotos === 'object' && !Array.isArray(content.teamPhotos) ? content.teamPhotos : {};
+      content.teamPhotos[team] = record;
+      content.updatedAt = new Date().toISOString();
+      writeContent(content);
+
+      res.json({ success: true, ...record });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message, stack: process.env.NODE_ENV === 'production' ? undefined : e.stack });
+    }
+  });
+}
+
+app.post('/upload-team-photo', requireTeamContentAuth, handleTeamPhotoUpload);
+app.post('/api/upload-team-photo', requireTeamContentAuth, handleTeamPhotoUpload);
 
 
 function getTeamPhotoRecord(team) {
   const content = readContent();
-  if (content.teamPhotos && content.teamPhotos[team]) return content.teamPhotos[team];
+  if (content.teamPhotos && content.teamPhotos[team]) return normalizeTeamPhotoUrl(content.teamPhotos[team]);
   const meta = readTeamMeta();
   const list = meta[team];
-  if (Array.isArray(list) && list.length) return list[0];
+  if (Array.isArray(list) && list.length) return normalizeTeamPhotoUrl(list[0]);
   return null;
 }
 
