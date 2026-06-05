@@ -808,6 +808,25 @@ app.get('/api/subscribers', requireAdminKey, (req, res) => {
   res.json({ success: true, count: subscribers.length, subscribers: subscribers.map(item => ({ email: item.email, subscribedAt: item.subscribedAt || null })) });
 });
 
+
+app.get('/api/notifications/status', (req, res) => {
+  const subscribers = readSubscribers();
+  res.json({
+    success: true,
+    smtpConfigured: smtpConfigured(),
+    subscriberCount: subscribers.length,
+    smtp: {
+      hostConfigured: !!process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT || '465',
+      secure: String(process.env.SMTP_SECURE || '').toLowerCase() !== 'false',
+      userConfigured: !!process.env.SMTP_USER,
+      passConfigured: !!process.env.SMTP_PASS,
+      fromConfigured: !!(process.env.MAIL_FROM || process.env.SMTP_FROM)
+    },
+    requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_SECURE','SMTP_USER','SMTP_PASS','MAIL_FROM']
+  });
+});
+
 app.get('/api/notifications/schedule-preview', requireAdminKey, (req, res) => {
   const content = readContent();
   const preview = buildScheduleUpdateEmail(content, { limit: Number(req.query.limit || 5) });
