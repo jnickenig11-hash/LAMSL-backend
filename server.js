@@ -9,6 +9,15 @@ import crypto from 'crypto';
 const app = express();
 app.use(express.json());
 app.use(cors());
+// LAMSL no-store: dynamic API/file listing responses must not be cached by browsers/CDNs.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/') || req.path === '/slideshow-images' || req.path === '/ef-images') {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 const SESSION_SECRET = process.env.LAMSL_SESSION_SECRET || ADMIN_API_KEY || 'lamsl-dev-session-secret';
@@ -71,13 +80,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const persistentRoot = process.env.LAMSL_STORAGE_DIR || process.env.RENDER_DISK_MOUNT || projectRoot;
 const uploadDir = path.join(persistentRoot, 'uploads');
+const slideshowDir = path.join(persistentRoot, 'SlideshowImages');
 const logsDir = path.join(persistentRoot, 'logs');
-const efDir = path.join(persistentRoot, 'EF_Images');
+const efDir = path.join(persistentRoot, 'EFimages');
 const dataDir = path.join(persistentRoot, 'data');
 const teamProfileDir = path.join(persistentRoot, 'teamProfile images');
 const bundledDataDir = path.join(projectRoot, 'data');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+}
+if (!fs.existsSync(slideshowDir)) {
+  fs.mkdirSync(slideshowDir, { recursive: true });
 }
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
@@ -118,8 +131,17 @@ app.post('/api/subscribe', (req, res) => {
 });
 
 // Image upload endpoint
+function getImageDestination(req) {
+  const raw = String((req.body && (req.body.destination || req.body.target || req.body.imageType)) || 'homepage').toLowerCase();
+  if (['event', 'events', 'fundraiser', 'fundraisers', 'ef', 'efimages'].includes(raw)) return 'events';
+  return 'homepage';
+}
+
 const upload = multer({ storage: multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
+  destination: (req, file, cb) => {
+    const destination = getImageDestination(req);
+    cb(null, destination === 'events' ? efDir : slideshowDir);
+  },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname || '') || '';
     const safeBase = path.basename(file.originalname || 'image', ext).replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40) || 'image';
@@ -130,7 +152,9 @@ const upload = multer({ storage: multer.diskStorage({
 app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
-    const url = '/uploads/' + req.file.filename;
+    const destination = getImageDestination(req);
+    const publicFolder = destination === 'events' ? '/EFimages/' : '/SlideshowImages/';
+    const url = publicFolder + req.file.filename;
     const content = readContent();
     const imageRecord = {
       url,
@@ -139,13 +163,24 @@ app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res
       filename: req.file.filename,
       originalName: req.file.originalname || '',
       caption: String(req.body.caption || '').trim(),
+      destination,
       uploadedAt: new Date().toISOString()
     };
-    content.slideshow = Array.isArray(content.slideshow) ? content.slideshow : [];
-    content.slideshow.unshift(imageRecord);
+
+    if (destination === 'events') {
+      content.eventFundraiserImages = Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages : [];
+      content.eventFundraiserImages.unshift(imageRecord);
+      const meta = readEfMeta();
+      meta.unshift({ name: req.file.filename, path: url, url, caption: imageRecord.caption, uploadedAt: imageRecord.uploadedAt });
+      writeEfMeta(meta);
+    } else {
+      content.slideshow = Array.isArray(content.slideshow) ? content.slideshow : [];
+      content.slideshow.unshift(imageRecord);
+    }
+
     content.updatedAt = new Date().toISOString();
     writeContent(content);
-    res.json({ success: true, url, image: imageRecord, content });
+    res.json({ success: true, destination, url, image: imageRecord, content });
   } catch (error) {
     console.error('Image upload failed:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -154,7 +189,17 @@ app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res
 
 // Serve uploaded images
 app.use('/uploads', express.static(uploadDir));
+app.use('/SlideshowImages', express.static(slideshowDir));
+app.get('/slideshow-images', (req, res) => {
+  try {
+    const content = readContent();
+    res.json({ success: true, images: getMergedHomepageSlideshow(content) });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 app.use('/teamProfile images', express.static(teamProfileDir));
+app.use('/EFimages', express.static(efDir));
 app.use('/EF_Images', express.static(efDir));
 
 // Admin action logging endpoint
@@ -232,6 +277,7 @@ function normalizeContent(raw) {
   if (!Array.isArray(content.gameScores)) content.gameScores = [];
   if (!Array.isArray(content.practiceSchedules)) content.practiceSchedules = [];
   if (!Array.isArray(content.slideshow)) content.slideshow = [];
+  if (!Array.isArray(content.eventFundraiserImages)) content.eventFundraiserImages = [];
   content.standings = buildStandingsFromGamesBackend(content.gameSchedules);
   if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
   if (typeof content.homepageMessage !== 'string') content.homepageMessage = '';
@@ -276,13 +322,38 @@ app.get('/api/storage-status', (req, res) => {
     contentFile,
     storageDirConfigured: !!process.env.LAMSL_STORAGE_DIR,
     contentFileExists: fs.existsSync(contentFile),
-    uploadDirExists: fs.existsSync(uploadDir)
+    uploadDirExists: fs.existsSync(uploadDir),
+    slideshowDir,
+    slideshowDirExists: fs.existsSync(slideshowDir)
   });
 });
 
+function getMergedHomepageSlideshow(content) {
+  const contentImages = Array.isArray(content.slideshow) ? content.slideshow : [];
+  let diskImages = [];
+  try {
+    diskImages = fs.readdirSync(slideshowDir)
+      .filter(name => /\.(png|jpe?g|gif|webp|svg)$/i.test(name))
+      .map(name => ({ name, filename: name, url: '/SlideshowImages/' + name, path: '/SlideshowImages/' + name, caption: '' }));
+  } catch (error) {
+    diskImages = [];
+  }
+  const seen = new Set();
+  return [...contentImages, ...diskImages].filter(img => {
+    const key = img && (img.url || img.path || img.filename || img.name);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 app.get('/api/content', (req, res) => {
   const content = readContent();
-  res.json(content);
+  res.json({
+    ...content,
+    slideshow: getMergedHomepageSlideshow(content),
+    deploymentVersion: '2026.06.05-stability-single-source-v1'
+  });
 });
 
 app.post('/api/update', requireAdminKey, (req, res) => {
@@ -295,6 +366,7 @@ app.post('/api/update', requireAdminKey, (req, res) => {
       gameSchedules: Array.isArray(incoming.gameSchedules) ? incoming.gameSchedules : (current.gameSchedules || []),
       practiceSchedules: Array.isArray(incoming.practiceSchedules) ? incoming.practiceSchedules : (current.practiceSchedules || []),
       slideshow: Array.isArray(incoming.slideshow) ? incoming.slideshow : (current.slideshow || []),
+      eventFundraiserImages: Array.isArray(incoming.eventFundraiserImages) ? incoming.eventFundraiserImages : (current.eventFundraiserImages || []),
       announcements: Array.isArray(incoming.announcements) ? incoming.announcements : (current.announcements || []),
       zelle: incoming.zelle && typeof incoming.zelle === 'object' ? incoming.zelle : (current.zelle || {}),
       homepageMessage: Object.prototype.hasOwnProperty.call(incoming, 'homepageMessage') ? incoming.homepageMessage : (current.homepageMessage || '')
@@ -319,7 +391,18 @@ const efMetaFile = path.join(projectRoot, 'ef_images_metadata.json');
 function readEfMeta() {
   try {
     if (!fs.existsSync(efMetaFile)) return [];
-    return JSON.parse(fs.readFileSync(efMetaFile, 'utf8'));
+    const parsed = JSON.parse(fs.readFileSync(efMetaFile, 'utf8'));
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object') {
+      return Object.entries(parsed).map(([name, value]) => ({
+        name,
+        filename: name,
+        path: value?.path || value?.url || ('/EFimages/' + name),
+        url: value?.url || value?.path || ('/EFimages/' + name),
+        caption: value?.caption || ''
+      }));
+    }
+    return [];
   } catch (e) { return []; }
 }
 function writeEfMeta(arr) {
@@ -345,9 +428,9 @@ app.post('/upload-ef', requireAdminKey, uploadEf.single('photo'), (req, res) => 
     if (!req.file) return res.status(400).json({ success: false, error: 'No file' });
     const caption = (req.body.caption || '').toString();
     const filename = req.file.filename;
-    const relPath = path.join('EF_Images', filename).replace(/\\/g, '/');
+    const relPath = ('/EFimages/' + filename);
     const meta = readEfMeta();
-    meta.unshift({ name: filename, path: relPath, caption });
+    meta.unshift({ name: filename, path: relPath, url: relPath, caption });
     writeEfMeta(meta);
     res.json({ success: true, filename, path: relPath, caption });
   } catch (e) {
