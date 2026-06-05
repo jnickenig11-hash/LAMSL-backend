@@ -5,6 +5,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import crypto from 'crypto';
+import net from 'net';
+import tls from 'tls';
 
 const app = express();
 app.use(express.json());
@@ -122,21 +124,19 @@ if (!fs.existsSync(legacyTeamProfileDir)) {
 
 // Email signup endpoint
 app.post('/api/subscribe', (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body?.email);
 
-  if (!email || !email.includes('@')) {
+  if (!email) {
     return res.status(400).json({
       success: false,
       message: 'Invalid email'
     });
   }
 
-  const subscribersFile = path.join(projectRoot, 'email_subscribers.json');
-  let subscribers = [];
-  try { subscribers = fs.existsSync(subscribersFile) ? JSON.parse(fs.readFileSync(subscribersFile, 'utf8') || '[]') : []; } catch (e) { subscribers = []; }
+  const subscribers = readSubscribers();
   if (!subscribers.some(item => String(item.email || item).toLowerCase() === email.toLowerCase())) {
-    subscribers.push({ email, subscribedAt: new Date().toISOString() });
-    fs.writeFileSync(subscribersFile, JSON.stringify(subscribers, null, 2));
+    subscribers.push({ email, subscribedAt: new Date().toISOString(), source: 'website' });
+    writeSubscribers(subscribers);
   }
 
   res.json({
@@ -439,9 +439,10 @@ app.get('/api/content', (req, res) => {
   });
 });
 
-app.post('/api/update', requireAdminKey, (req, res) => {
+app.post('/api/update', requireAdminKey, async (req, res) => {
   try {
     const current = loadContent();
+    const previousScheduleSignature = scheduleSignature(current);
     const incoming = req.body && typeof req.body === 'object' ? req.body : {};
     const next = {
       ...current,
@@ -465,7 +466,12 @@ app.post('/api/update', requireAdminKey, (req, res) => {
     next.updatedAt = new Date().toISOString();
 
     saveContent(next);
-    res.json({ success: true, content: next });
+    const nextScheduleSignature = scheduleSignature(next);
+    if (previousScheduleSignature !== nextScheduleSignature && process.env.LAMSL_AUTO_NOTIFY_SCHEDULE_UPDATES !== 'false') {
+      sendScheduleUpdateNotification(next, { automatic: true, reason: 'backend-schedule-change' })
+        .catch(error => logNotification({ type: 'schedule-update', status: 'automatic-send-error', error: error.message }));
+    }
+    res.json({ success: true, content: next, scheduleNotificationQueued: previousScheduleSignature !== nextScheduleSignature });
   } catch (error) {
     console.error('Content update failed:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -543,13 +549,286 @@ app.post('/remove-ef-photo', requireAdminKey, express.json(), (req, res) => {
   }
 });
 
-// ===== Notifications (no-op/stub) =====
-app.post('/notify-schedule-update', requireAdminKey, (req, res) => {
+
+// ===== Subscriber notifications =====
+function normalizeEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return '';
+  return email;
+}
+
+function subscribersFilePath() {
+  return path.join(dataDir, 'email_subscribers.json');
+}
+
+function legacySubscribersFilePath() {
+  return path.join(projectRoot, 'email_subscribers.json');
+}
+
+function readSubscribers() {
+  const files = [subscribersFilePath(), legacySubscribersFilePath()];
+  const byEmail = new Map();
+  for (const file of files) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8') || '[]');
+      const list = Array.isArray(parsed) ? parsed : [];
+      list.forEach(item => {
+        const email = normalizeEmail(item?.email || item);
+        if (!email) return;
+        byEmail.set(email, typeof item === 'object' ? { ...item, email } : { email });
+      });
+    } catch (error) {
+      console.warn('Subscriber read failed:', file, error.message);
+    }
+  }
+  return [...byEmail.values()].sort((a, b) => String(a.email).localeCompare(String(b.email)));
+}
+
+function writeSubscribers(subscribers) {
+  const cleaned = [];
+  const seen = new Set();
+  (subscribers || []).forEach(item => {
+    const email = normalizeEmail(item?.email || item);
+    if (!email || seen.has(email)) return;
+    seen.add(email);
+    cleaned.push(typeof item === 'object' ? { ...item, email } : { email });
+  });
+  fs.writeFileSync(subscribersFilePath(), JSON.stringify(cleaned, null, 2));
+  return cleaned;
+}
+
+function formatEmailDate(dateKey) {
+  if (!dateKey) return 'TBD';
+  const d = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateKey;
+  return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+}
+
+function formatEmailTime(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'TBD';
+  const cleaned = raw.replace(/\s+/g, ' ').replace(/\b(am|pm)\s*(am|pm)\b/ig, '$1').trim();
+  const match = cleaned.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (!match) return cleaned.toUpperCase().replace(/\s*([AP]M)$/i, ' $1');
+  let hour = Number(match[1]);
+  const minute = match[2] || '00';
+  let suffix = match[3] ? match[3].toUpperCase() : '';
+  if (!suffix) {
+    suffix = hour >= 12 ? 'PM' : 'AM';
+    if (hour > 12) hour -= 12;
+    if (hour === 0) hour = 12;
+  }
+  return `${hour}:${minute} ${suffix}`;
+}
+
+function getUpcomingGames(content, limit = 5) {
+  const games = Array.isArray(content?.gameSchedules) ? content.gameSchedules : [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const sorted = [...games].sort((a, b) => `${a.date || ''} ${a.time || ''}`.localeCompare(`${b.date || ''} ${b.time || ''}`));
+  const upcoming = sorted.filter(game => {
+    const d = new Date(`${game.date}T00:00:00`);
+    return !Number.isNaN(d.getTime()) && d >= today;
+  });
+  return (upcoming.length ? upcoming : sorted).slice(0, limit);
+}
+
+function escapeEmailHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+function buildNextGamesRows(games) {
+  if (!games.length) {
+    return '<tr><td colspan="5">No upcoming games are currently scheduled.</td></tr>';
+  }
+  return games.map(game => {
+    const matchup = `${game.team1 || 'TBD'} vs ${game.team2 || 'TBD'}`;
+    return `<tr><td>${escapeEmailHtml(formatEmailDate(game.date))}</td><td>${escapeEmailHtml(formatEmailTime(game.time))}</td><td>${escapeEmailHtml(game.division || 'All')}</td><td>${escapeEmailHtml(matchup)}</td><td>${escapeEmailHtml(game.park || 'TBD')}</td></tr>`;
+  }).join('\n');
+}
+
+function buildScheduleUpdateEmail(content, options = {}) {
+  const games = getUpcomingGames(content, Number(options.limit || 5));
+  const rows = buildNextGamesRows(games);
+  const subject = options.subject || 'LAMSL Schedule Update';
+  const textLines = [
+    'Hello LAMSL Families,',
+    '',
+    'The LAMSL game schedule has been updated. Below is a quick snapshot of the upcoming games currently scheduled.',
+    '',
+    ...games.map(game => `${formatEmailDate(game.date)} ${formatEmailTime(game.time)} - ${game.team1 || 'TBD'} vs ${game.team2 || 'TBD'} - ${game.park || 'TBD'}`),
+    '',
+    'View the full schedule: https://www.lamsl.com/schedule.html',
+    '',
+    'Los Angeles Municipal Softball League'
+  ];
+  const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>${escapeEmailHtml(subject)}</title></head>
+<body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif;color:#222;">
+<div style="width:100%;padding:30px 0;"><div style="max-width:700px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #d9d9d9;">
+<div style="background:#12324A;color:#fff;text-align:center;padding:24px;"><h1 style="margin:0;font-size:28px;">LAMSL Schedule Update</h1></div>
+<div style="padding:30px;"><h2 style="margin-top:0;color:#12324A;">Hello LAMSL Families,</h2>
+<p style="font-size:16px;line-height:1.6;">The LAMSL game schedule has been updated. Below is a quick snapshot of the upcoming games currently scheduled.</p>
+<div style="background:#f1f5fb;border-left:5px solid #C86A2F;padding:12px 15px;margin-bottom:15px;font-weight:bold;color:#12324A;">Upcoming Games Snapshot</div>
+<table style="width:100%;border-collapse:collapse;margin-bottom:25px;"><thead><tr><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Date</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Time</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Division</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Matchup</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Park</th></tr></thead><tbody>${rows}</tbody></table>
+<div style="text-align:center;margin-top:30px;"><a href="https://www.lamsl.com/schedule.html" style="display:inline-block;background:#12324A;color:#fff;text-decoration:none;padding:14px 24px;border-radius:6px;font-weight:bold;">View Full Schedule</a></div>
+</div><div style="background:#f1f1f1;padding:20px;text-align:center;font-size:12px;color:#666;">Los Angeles Municipal Softball League<br>You are receiving this email because you subscribed to LAMSL schedule notifications.</div>
+</div></div></body></html>`;
+  return { subject, html, text: textLines.join('\n'), games };
+}
+
+function smtpConfigured() {
+  return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && (process.env.MAIL_FROM || process.env.SMTP_FROM));
+}
+
+function readSmtpResponse(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => reject(new Error('SMTP response timeout')), 20000);
+    const onData = chunk => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      if (lines.length && /^\d{3}\s/.test(lines[lines.length - 1])) {
+        cleanup();
+        resolve(buffer);
+      }
+    };
+    const onError = error => { cleanup(); reject(error); };
+    const cleanup = () => { clearTimeout(timer); socket.off('data', onData); socket.off('error', onError); };
+    socket.on('data', onData);
+    socket.on('error', onError);
+  });
+}
+
+async function smtpCommand(socket, command, expected = /^[23]/) {
+  if (command) socket.write(command + '\r\n');
+  const response = await readSmtpResponse(socket);
+  const code = response.slice(0, 3);
+  if (!expected.test(code)) throw new Error(`SMTP command failed (${code}): ${response.trim()}`);
+  return response;
+}
+
+function openSmtpSocket() {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = String(process.env.SMTP_SECURE || '').toLowerCase() !== 'false';
+  return new Promise((resolve, reject) => {
+    const socket = secure ? tls.connect({ host, port, servername: host }) : net.connect({ host, port });
+    socket.setTimeout(30000);
+    socket.once('secureConnect', () => resolve(socket));
+    socket.once('connect', () => { if (!secure) resolve(socket); });
+    socket.once('error', reject);
+    socket.once('timeout', () => reject(new Error('SMTP connection timeout')));
+  });
+}
+
+function buildRawEmail({ from, to, subject, html, text }) {
+  const boundary = `LAMSL-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    text,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    html,
+    '',
+    `--${boundary}--`,
+    ''
+  ].join('\r\n');
+}
+
+async function sendSmtpEmail({ to, subject, html, text }) {
+  const from = process.env.MAIL_FROM || process.env.SMTP_FROM;
+  const socket = await openSmtpSocket();
   try {
-    const payload = req.body || {};
-    const ln = JSON.stringify({ ts: new Date().toISOString(), type: 'schedule-update', payload }) + '\n';
-    fs.appendFileSync(path.join(logsDir, 'notifications.log'), ln);
-    res.json({ success: true });
+    await smtpCommand(socket, null);
+    await smtpCommand(socket, `EHLO ${process.env.SMTP_EHLO_DOMAIN || 'lamsl.com'}`);
+    await smtpCommand(socket, `AUTH PLAIN ${Buffer.from(`\0${process.env.SMTP_USER}\0${process.env.SMTP_PASS}`).toString('base64')}`);
+    await smtpCommand(socket, `MAIL FROM:<${from.match(/<([^>]+)>/)?.[1] || from}>`);
+    await smtpCommand(socket, `RCPT TO:<${to}>`);
+    await smtpCommand(socket, 'DATA', /^3/);
+    socket.write(buildRawEmail({ from, to, subject, html, text }).replace(/\r?\n\.\r?\n/g, '\r\n..\r\n') + '\r\n.\r\n');
+    await smtpCommand(socket, null);
+    await smtpCommand(socket, 'QUIT', /^[23]/).catch(() => null);
+  } finally {
+    socket.end();
+  }
+}
+
+function logNotification(entry) {
+  fs.appendFileSync(path.join(logsDir, 'notifications.log'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
+}
+
+async function sendScheduleUpdateNotification(content, options = {}) {
+  const subscribers = readSubscribers();
+  const email = buildScheduleUpdateEmail(content, options);
+  const result = { success: true, configured: smtpConfigured(), subscriberCount: subscribers.length, sent: 0, failed: 0, preview: email };
+  if (!subscribers.length) {
+    logNotification({ type: 'schedule-update', status: 'skipped-no-subscribers', options });
+    return result;
+  }
+  if (!smtpConfigured()) {
+    logNotification({ type: 'schedule-update', status: 'preview-only-smtp-not-configured', subscriberCount: subscribers.length, options, subject: email.subject });
+    result.success = false;
+    result.error = 'SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and MAIL_FROM in Render.';
+    return result;
+  }
+  for (const subscriber of subscribers) {
+    try {
+      await sendSmtpEmail({ to: subscriber.email, subject: email.subject, html: email.html, text: email.text });
+      result.sent += 1;
+    } catch (error) {
+      result.failed += 1;
+      logNotification({ type: 'schedule-update', status: 'send-failed', to: subscriber.email, error: error.message });
+    }
+  }
+  logNotification({ type: 'schedule-update', status: 'sent', subscriberCount: subscribers.length, sent: result.sent, failed: result.failed, automatic: !!options.automatic });
+  return result;
+}
+
+function scheduleSignature(content) {
+  const games = Array.isArray(content?.gameSchedules) ? content.gameSchedules : [];
+  return crypto.createHash('sha256').update(JSON.stringify(games.map(g => ({ id: g.id, date: g.date, time: g.time, park: g.park, division: g.division, team1: g.team1, team2: g.team2, score1: g.score1, score2: g.score2, status: g.status })))).digest('hex');
+}
+
+app.get('/api/subscribers', requireAdminKey, (req, res) => {
+  const subscribers = readSubscribers();
+  res.json({ success: true, count: subscribers.length, subscribers: subscribers.map(item => ({ email: item.email, subscribedAt: item.subscribedAt || null })) });
+});
+
+app.get('/api/notifications/schedule-preview', requireAdminKey, (req, res) => {
+  const content = readContent();
+  const preview = buildScheduleUpdateEmail(content, { limit: Number(req.query.limit || 5) });
+  res.json({ success: true, subscriberCount: readSubscribers().length, smtpConfigured: smtpConfigured(), preview });
+});
+
+app.post('/api/notifications/send-schedule-update', requireAdminKey, async (req, res) => {
+  try {
+    const content = readContent();
+    const result = await sendScheduleUpdateNotification(content, { manual: true, reason: req.body?.reason || 'manual-admin-send' });
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ===== Notifications legacy aliases =====
+app.post('/notify-schedule-update', requireAdminKey, async (req, res) => {
+  try {
+    const result = await sendScheduleUpdateNotification(readContent(), { manual: true, reason: req.body?.reason || 'legacy-notify-schedule-update' });
+    res.status(result.success ? 200 : 400).json(result);
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
