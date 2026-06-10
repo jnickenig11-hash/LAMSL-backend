@@ -1108,6 +1108,57 @@ app.post('/api/rosters', requireTeamContentAuth, (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+
+
+// ===== Team player roster data =====
+app.get('/api/team-players', (req, res) => {
+  const content = readContent();
+  res.json({ success: true, teamPlayers: content.teamPlayers || {} });
+});
+
+app.post('/api/team-players', requireTeamContentAuth, (req, res) => {
+  try {
+    const payload = req.body || {};
+    const teamKey = String(payload.teamKey || '').trim();
+    const teamName = String(payload.teamName || '').trim();
+    const division = String(payload.division || '').trim().toUpperCase();
+    const players = Array.isArray(payload.players) ? payload.players : [];
+    if (!teamKey && !teamName) return res.status(400).json({ success: false, error: 'teamKey or teamName is required' });
+
+    const token = req.headers['x-admin-key'] || getBearerToken(req);
+    const session = verifySessionToken(token) || getStaticSession(req) || null;
+    const role = String(session?.role || req.headers['x-lamsl-role'] || '').toLowerCase().replace('_','-');
+    const assignedTeam = String(session?.assignedTeam || req.headers['x-lamsl-assigned-team'] || '').trim().toLowerCase();
+    const assignedDivision = String(session?.assignedDivision || req.headers['x-lamsl-assigned-division'] || '').trim().toUpperCase();
+    const targetTeam = String(teamName || teamKey.split('|').pop() || '').trim().toLowerCase();
+    const targetDivision = String(division || teamKey.split('|')[0] || '').trim().toUpperCase();
+    if (role === 'team-manager') {
+      if (!assignedTeam || assignedTeam !== targetTeam || (assignedDivision && assignedDivision !== targetDivision)) {
+        return res.status(403).json({ success: false, error: 'Team managers can only update their assigned team.' });
+      }
+    }
+
+    const cleaned = players.map((p, index) => ({
+      id: String(p.id || `${Date.now()}-${index}`),
+      name: String(p.name || p.Name || '').trim(),
+      position: String(p.position || p.Position || '').trim(),
+      phone: String(p.phone || p.Phone || '').trim(),
+      email: String(p.email || p.Email || '').trim(),
+      gamesPlayed: Number(p.gamesPlayed || p.GamesPlayed || 0) || 0,
+      photo: String(p.photo || p.Photo || '').trim()
+    })).filter(p => p.name && p.position);
+
+    const content = readContent();
+    content.teamPlayers = content.teamPlayers && typeof content.teamPlayers === 'object' && !Array.isArray(content.teamPlayers) ? content.teamPlayers : {};
+    const entry = { players: cleaned, updatedAt: new Date().toISOString(), team: teamName, division };
+    if (teamKey) content.teamPlayers[teamKey] = entry;
+    if (teamName) content.teamPlayers[teamName] = entry;
+    content.updatedAt = new Date().toISOString();
+    writeContent(content);
+    res.json({ success: true, teamPlayers: content.teamPlayers, players: cleaned });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
