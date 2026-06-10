@@ -122,6 +122,43 @@ if (!fs.existsSync(legacyTeamProfileDir)) {
   fs.mkdirSync(legacyTeamProfileDir, { recursive: true });
 }
 
+
+const usersFile = path.join(dataDir, 'users.json');
+function readUsers(){
+  try {
+    if(!fs.existsSync(usersFile)) {
+      const seed=[{username:'admin',password:'admin',role:'admin'}];
+      fs.writeFileSync(usersFile, JSON.stringify(seed,null,2));
+      return seed;
+    }
+    return JSON.parse(fs.readFileSync(usersFile,'utf8'));
+  } catch(e){ return [{username:'admin',password:'admin',role:'admin'}]; }
+}
+function writeUsers(users){ fs.writeFileSync(usersFile, JSON.stringify(users,null,2)); return users; }
+
+app.get('/api/users', requireAdminKey, (req,res)=>{
+  const users=readUsers().map(u=>({...u,password:'********'}));
+  res.json({success:true, users});
+});
+
+app.post('/api/users', requireAdminKey, (req,res)=>{
+  const users=readUsers();
+  const payload=req.body||{};
+  if(!payload.username || !payload.password) return res.status(400).json({success:false,error:'username and password required'});
+  const existing=users.findIndex(u=>u.username===payload.username);
+  const record={username:payload.username,password:payload.password,role:payload.role||'user'};
+  if(existing>=0) users[existing]=record;
+  else users.push(record);
+  writeUsers(users);
+  res.json({success:true, users:users.map(u=>({...u,password:'********'}))});
+});
+
+app.delete('/api/users/:username', requireAdminKey, (req,res)=>{
+  const users=readUsers().filter(u=>u.username!==req.params.username || u.username==='admin');
+  writeUsers(users);
+  res.json({success:true});
+});
+
 // Email signup endpoint
 app.post('/api/subscribe', (req, res) => {
   const email = normalizeEmail(req.body?.email);
