@@ -38,14 +38,21 @@ function createSessionToken(payload) {
 }
 
 function verifySessionToken(token) {
-  if (!token || !token.includes('.')) return null;
-  const [body, sig] = token.split('.');
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-  if (!payload.exp || Date.now() > payload.exp) return null;
-  if (!['admin', 'umpire'].includes(String(payload.role || '').toLowerCase())) return null;
-  return payload;
+  try {
+    if (!token || !token.includes('.')) return null;
+    const [body, sig] = token.split('.');
+    const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+    const sigBuffer = Buffer.from(sig || '');
+    const expectedBuffer = Buffer.from(expected);
+    if (sigBuffer.length !== expectedBuffer.length) return null;
+    if (!crypto.timingSafeEqual(sigBuffer, expectedBuffer)) return null;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!payload.exp || Date.now() > payload.exp) return null;
+    if (!['admin', 'umpire', 'team-manager', 'user'].includes(String(payload.role || '').toLowerCase())) return null;
+    return payload;
+  } catch (error) {
+    return null;
+  }
 }
 
 function getStaticSession(req) {
@@ -136,6 +143,19 @@ function readUsers(){
 }
 function writeUsers(users){ fs.writeFileSync(usersFile, JSON.stringify(users,null,2)); return users; }
 
+app.post('/api/login', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+  if (!username || !password) return res.status(400).json({ success: false, error: 'username and password required' });
+  const users = readUsers();
+  const user = users.find(item => String(item.username || '') === username && String(item.password || '') === password);
+  if (!user) return res.status(401).json({ success: false, error: 'Invalid username or password.' });
+  const role = String(user.role || 'user').toLowerCase();
+  const token = createSessionToken({ username: user.username, role, iat: Date.now(), exp: Date.now() + 12 * 60 * 60 * 1000 });
+  res.json({ success: true, username: user.username, role, token, expiresInHours: 12 });
+});
+
+
 app.get('/api/users', requireAdminKey, (req,res)=>{
   const users=readUsers().map(u=>({...u,password:'********'}));
   res.json({success:true, users});
@@ -149,6 +169,25 @@ app.post('/api/users', requireAdminKey, (req,res)=>{
   const record={username:payload.username,password:payload.password,role:payload.role||'user'};
   if(existing>=0) users[existing]=record;
   else users.push(record);
+  writeUsers(users);
+  res.json({success:true, users:users.map(u=>({...u,password:'********'}))});
+});
+
+
+app.put('/api/users/:username', requireAdminKey, (req,res)=>{
+  const users=readUsers();
+  const original=req.params.username;
+  const payload=req.body||{};
+  const existing=users.findIndex(u=>u.username===original);
+  if(existing<0) return res.status(404).json({success:false,error:'user not found'});
+  const username=payload.username || original;
+  if(username !== original && users.some(u=>u.username===username)) return res.status(409).json({success:false,error:'username already exists'});
+  users[existing]={
+    ...users[existing],
+    username,
+    role: payload.role || users[existing].role || 'user',
+    password: payload.password ? payload.password : users[existing].password
+  };
   writeUsers(users);
   res.json({success:true, users:users.map(u=>({...u,password:'********'}))});
 });
@@ -688,29 +727,29 @@ function buildNextGamesRows(games) {
 function buildScheduleUpdateEmail(content, options = {}) {
   const games = getUpcomingGames(content, Number(options.limit || 5));
   const rows = buildNextGamesRows(games);
-  const subject = options.subject || 'LAMSL Schedule Update';
+  const subject = options.subject || 'LAMSL Weekly Schedule Update';
   const textLines = [
-    'Hello LAMSL Families,',
+    'Hello LAMSL Subscriber,',
     '',
-    'The LAMSL game schedule has been updated. Below is a quick snapshot of the upcoming games currently scheduled.',
+    'The game schedule has been updated. Below is a snapshot of the upcoming games currently scheduled.',
     '',
     ...games.map(game => `${formatEmailDate(game.date)} ${formatEmailTime(game.time)} - ${game.team1 || 'TBD'} vs ${game.team2 || 'TBD'} - ${game.park || 'TBD'}`),
     '',
     'View the full schedule: https://www.lamsl.com/schedule.html',
     '',
-    'Los Angeles Municipal Softball League'
+    'LAMSL Support Team\nlamslsupport@gmail.com\nhttps://www.lamsl.com'
   ];
   const html = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>${escapeEmailHtml(subject)}</title></head>
 <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif;color:#222;">
 <div style="width:100%;padding:30px 0;"><div style="max-width:700px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #d9d9d9;">
-<div style="background:#12324A;color:#fff;text-align:center;padding:24px;"><h1 style="margin:0;font-size:28px;">LAMSL Schedule Update</h1></div>
-<div style="padding:30px;"><h2 style="margin-top:0;color:#12324A;">Hello LAMSL Families,</h2>
-<p style="font-size:16px;line-height:1.6;">The LAMSL game schedule has been updated. Below is a quick snapshot of the upcoming games currently scheduled.</p>
-<div style="background:#f1f5fb;border-left:5px solid #C86A2F;padding:12px 15px;margin-bottom:15px;font-weight:bold;color:#12324A;">Upcoming Games Snapshot</div>
+<div style="background:#12324A;color:#fff;text-align:center;padding:24px;"><h1 style="margin:0;font-size:28px;">LAMSL Weekly Schedule Update</h1></div>
+<div style="padding:30px;"><h2 style="margin-top:0;color:#12324A;">Hello LAMSL Subscriber,</h2>
+<p style="font-size:16px;line-height:1.6;">The game schedule has been updated. Below is a snapshot of the upcoming games currently scheduled.</p>
+<div style="background:#f1f5fb;border-left:5px solid #C86A2F;padding:12px 15px;margin-bottom:15px;font-weight:bold;color:#12324A;">Next Games Mini Schedule</div>
 <table style="width:100%;border-collapse:collapse;margin-bottom:25px;"><thead><tr><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Date</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Time</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Division</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Matchup</th><th style="background:#12324A;color:#fff;padding:12px;text-align:left;">Park</th></tr></thead><tbody>${rows}</tbody></table>
 <div style="text-align:center;margin-top:30px;"><a href="https://www.lamsl.com/schedule.html" style="display:inline-block;background:#12324A;color:#fff;text-decoration:none;padding:14px 24px;border-radius:6px;font-weight:bold;">View Full Schedule</a></div>
-</div><div style="background:#f1f1f1;padding:20px;text-align:center;font-size:12px;color:#666;">Los Angeles Municipal Softball League<br>You are receiving this email because you subscribed to LAMSL schedule notifications.</div>
+</div><div style="background:#f1f1f1;padding:20px;text-align:center;font-size:12px;color:#666;">LAMSL Support Team<br>lamslsupport@gmail.com<br>https://www.lamsl.com<br><br>You are receiving this email because you subscribed to LAMSL schedule notifications.</div>
 </div></div></body></html>`;
   return { subject, html, text: textLines.join('\n'), games };
 }
@@ -746,10 +785,21 @@ async function smtpCommand(socket, command, expected = /^[23]/) {
   return response;
 }
 
+function getSmtpPort() {
+  return Number(process.env.SMTP_PORT || 587);
+}
+
+function smtpSecureMode() {
+  const explicit = String(process.env.SMTP_SECURE || '').trim().toLowerCase();
+  if (['true', '1', 'yes'].includes(explicit)) return true;
+  if (['false', '0', 'no'].includes(explicit)) return false;
+  return getSmtpPort() === 465;
+}
+
 function openSmtpSocket() {
   const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 465);
-  const secure = String(process.env.SMTP_SECURE || '').toLowerCase() !== 'false';
+  const port = getSmtpPort();
+  const secure = smtpSecureMode();
   return new Promise((resolve, reject) => {
     const socket = secure ? tls.connect({ host, port, servername: host }) : net.connect({ host, port });
     socket.setTimeout(30000);
@@ -757,6 +807,19 @@ function openSmtpSocket() {
     socket.once('connect', () => { if (!secure) resolve(socket); });
     socket.once('error', reject);
     socket.once('timeout', () => reject(new Error('SMTP connection timeout')));
+  });
+}
+
+function upgradeSmtpSocketToTls(socket) {
+  const host = process.env.SMTP_HOST;
+  return new Promise((resolve, reject) => {
+    socket.removeAllListeners('timeout');
+    const secureSocket = tls.connect({ socket, servername: host }, () => {
+      secureSocket.setTimeout(30000);
+      resolve(secureSocket);
+    });
+    secureSocket.once('error', reject);
+    secureSocket.once('timeout', () => reject(new Error('SMTP TLS connection timeout')));
   });
 }
 
@@ -788,10 +851,15 @@ function buildRawEmail({ from, to, subject, html, text }) {
 
 async function sendSmtpEmail({ to, subject, html, text }) {
   const from = process.env.MAIL_FROM || process.env.SMTP_FROM;
-  const socket = await openSmtpSocket();
+  let socket = await openSmtpSocket();
   try {
     await smtpCommand(socket, null);
     await smtpCommand(socket, `EHLO ${process.env.SMTP_EHLO_DOMAIN || 'lamsl.com'}`);
+    if (!smtpSecureMode()) {
+      await smtpCommand(socket, 'STARTTLS', /^2/);
+      socket = await upgradeSmtpSocketToTls(socket);
+      await smtpCommand(socket, `EHLO ${process.env.SMTP_EHLO_DOMAIN || 'lamsl.com'}`);
+    }
     await smtpCommand(socket, `AUTH PLAIN ${Buffer.from(`\0${process.env.SMTP_USER}\0${process.env.SMTP_PASS}`).toString('base64')}`);
     await smtpCommand(socket, `MAIL FROM:<${from.match(/<([^>]+)>/)?.[1] || from}>`);
     await smtpCommand(socket, `RCPT TO:<${to}>`);
@@ -837,7 +905,7 @@ async function sendScheduleUpdateNotification(content, options = {}) {
 
 function scheduleSignature(content) {
   const games = Array.isArray(content?.gameSchedules) ? content.gameSchedules : [];
-  return crypto.createHash('sha256').update(JSON.stringify(games.map(g => ({ id: g.id, date: g.date, time: g.time, park: g.park, division: g.division, team1: g.team1, team2: g.team2, score1: g.score1, score2: g.score2, status: g.status })))).digest('hex');
+  return crypto.createHash('sha256').update(JSON.stringify(games.map(g => ({ id: g.id, date: g.date, time: g.time, park: g.park, division: g.division, team1: g.team1, team2: g.team2, status: g.status })))).digest('hex');
 }
 
 app.get('/api/subscribers', requireAdminKey, (req, res) => {
@@ -854,13 +922,13 @@ app.get('/api/notifications/status', (req, res) => {
     subscriberCount: subscribers.length,
     smtp: {
       hostConfigured: !!process.env.SMTP_HOST,
-      port: process.env.SMTP_PORT || '465',
-      secure: String(process.env.SMTP_SECURE || '').toLowerCase() !== 'false',
+      port: String(getSmtpPort()),
+      secure: smtpSecureMode(),
       userConfigured: !!process.env.SMTP_USER,
       passConfigured: !!process.env.SMTP_PASS,
       fromConfigured: !!(process.env.MAIL_FROM || process.env.SMTP_FROM)
     },
-    requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_SECURE','SMTP_USER','SMTP_PASS','MAIL_FROM']
+    requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','MAIL_FROM']
   });
 });
 
