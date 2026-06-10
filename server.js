@@ -66,8 +66,10 @@ function getStaticSession(req) {
 function requireAdminKey(req, res, next) {
   const token = req.headers['x-admin-key'] || getBearerToken(req);
   if (ADMIN_API_KEY && token === ADMIN_API_KEY) return next();
-  if (verifySessionToken(token)) return next();
-  if (getStaticSession(req)) return next();
+  const session = verifySessionToken(token);
+  if (session && session.role === 'admin') return next();
+  const staticSession = getStaticSession(req);
+  if (staticSession && staticSession.role === 'admin') return next();
   return res.status(403).json({ success: false, error: 'Forbidden: admin login/session token or valid API key required' });
 }
 
@@ -151,8 +153,10 @@ app.post('/api/login', (req, res) => {
   const user = users.find(item => String(item.username || '') === username && String(item.password || '') === password);
   if (!user) return res.status(401).json({ success: false, error: 'Invalid username or password.' });
   const role = String(user.role || 'user').toLowerCase();
-  const token = createSessionToken({ username: user.username, role, iat: Date.now(), exp: Date.now() + 12 * 60 * 60 * 1000 });
-  res.json({ success: true, username: user.username, role, token, expiresInHours: 12 });
+  const assignedTeam = user.assignedTeam || user.team || '';
+  const assignedDivision = user.assignedDivision || user.division || '';
+  const token = createSessionToken({ username: user.username, role, assignedTeam, assignedDivision, iat: Date.now(), exp: Date.now() + 12 * 60 * 60 * 1000 });
+  res.json({ success: true, username: user.username, role, assignedTeam, assignedDivision, token, expiresInHours: 12 });
 });
 
 
@@ -166,7 +170,7 @@ app.post('/api/users', requireAdminKey, (req,res)=>{
   const payload=req.body||{};
   if(!payload.username || !payload.password) return res.status(400).json({success:false,error:'username and password required'});
   const existing=users.findIndex(u=>u.username===payload.username);
-  const record={username:payload.username,password:payload.password,role:payload.role||'user'};
+  const record={username:payload.username,password:payload.password,role:payload.role||'user',assignedTeam:payload.assignedTeam||payload.team||'',assignedDivision:payload.assignedDivision||payload.division||''};
   if(existing>=0) users[existing]=record;
   else users.push(record);
   writeUsers(users);
@@ -186,7 +190,9 @@ app.put('/api/users/:username', requireAdminKey, (req,res)=>{
     ...users[existing],
     username,
     role: payload.role || users[existing].role || 'user',
-    password: payload.password ? payload.password : users[existing].password
+    password: payload.password ? payload.password : users[existing].password,
+    assignedTeam: payload.assignedTeam !== undefined ? payload.assignedTeam : (payload.team !== undefined ? payload.team : (users[existing].assignedTeam || users[existing].team || '')),
+    assignedDivision: payload.assignedDivision !== undefined ? payload.assignedDivision : (payload.division !== undefined ? payload.division : (users[existing].assignedDivision || users[existing].division || ''))
   };
   writeUsers(users);
   res.json({success:true, users:users.map(u=>({...u,password:'********'}))});
