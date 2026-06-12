@@ -48,7 +48,7 @@ function verifySessionToken(token) {
     if (!crypto.timingSafeEqual(sigBuffer, expectedBuffer)) return null;
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     if (!payload.exp || Date.now() > payload.exp) return null;
-    if (!['admin', 'umpire', 'team-manager', 'user'].includes(String(payload.role || '').toLowerCase())) return null;
+    payload.role = String(payload.role || '').toLowerCase().replace('_','-'); if (payload.role === 'administrator') payload.role = 'admin'; if (!['admin', 'umpire', 'team-manager', 'manager', 'user'].includes(payload.role)) return null;
     return payload;
   } catch (error) {
     return null;
@@ -67,7 +67,7 @@ function requireAdminKey(req, res, next) {
   const token = req.headers['x-admin-key'] || getBearerToken(req);
   if (ADMIN_API_KEY && token === ADMIN_API_KEY) return next();
   const session = verifySessionToken(token);
-  if (session && session.role === 'admin') return next();
+  if (session && (session.role === 'admin' || session.role === 'administrator')) return next();
   const staticSession = getStaticSession(req);
   if (staticSession && staticSession.role === 'admin') return next();
   return res.status(403).json({ success: false, error: 'Forbidden: admin login/session token or valid API key required' });
@@ -152,7 +152,7 @@ app.post('/api/login', (req, res) => {
   const users = readUsers();
   const user = users.find(item => String(item.username || '') === username && String(item.password || '') === password);
   if (!user) return res.status(401).json({ success: false, error: 'Invalid username or password.' });
-  const role = String(user.role || 'user').toLowerCase();
+  let role = String(user.role || 'user').toLowerCase().replace('_','-'); if (role === 'administrator') role = 'admin'; if (role === 'team manager') role = 'team-manager';
   const assignedTeam = user.assignedTeam || user.team || '';
   const assignedDivision = user.assignedDivision || user.division || '';
   const token = createSessionToken({ username: user.username, role, assignedTeam, assignedDivision, iat: Date.now(), exp: Date.now() + 12 * 60 * 60 * 1000 });
