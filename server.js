@@ -59,7 +59,9 @@ function getStaticSession(req) {
   const role = String(req.headers['x-lamsl-role'] || '').toLowerCase();
   const sessionActive = req.headers['x-lamsl-session'] === 'active';
   const username = String(req.headers['x-lamsl-username'] || 'admin');
-  if (sessionActive && ['admin', 'umpire'].includes(role)) return { username, role };
+  const assignedTeam = String(req.headers['x-lamsl-assigned-team'] || '');
+  const assignedDivision = String(req.headers['x-lamsl-assigned-division'] || '').toUpperCase();
+  if (sessionActive && ['admin', 'umpire', 'team-manager', 'manager'].includes(role)) return { username, role: role === 'manager' ? 'team-manager' : role, assignedTeam, assignedDivision };
   return null;
 }
 
