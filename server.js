@@ -435,6 +435,21 @@ function buildStandingsFromGamesBackend(games) {
   return standings;
 }
 
+function hasFinalScore(game) {
+  if (!game || game.score1 === '' || game.score2 === '' || game.score1 == null || game.score2 == null) return false;
+  return Number.isFinite(Number(game.score1)) && Number.isFinite(Number(game.score2));
+}
+function allScheduledGamesScored(games) {
+  const validGames = (games || []).filter(game => game && game.team1 && game.team2 && String(game.status || 'scheduled').toLowerCase() !== 'cancelled');
+  return validGames.length > 0 && validGames.every(hasFinalScore);
+}
+function chooseStandings(games, existingStandings) {
+  const computed = buildStandingsFromGamesBackend(games || []);
+  if (allScheduledGamesScored(games || [])) return computed;
+  if (existingStandings && typeof existingStandings === 'object' && Object.keys(existingStandings).length) return existingStandings;
+  return computed;
+}
+
 function normalizeContent(raw) {
   const content = raw && typeof raw === 'object' ? raw : {};
   if (!Array.isArray(content.gameSchedules) || content.gameSchedules.length === 0) content.gameSchedules = DEFAULT_GAME_SCHEDULES;
@@ -445,7 +460,7 @@ function normalizeContent(raw) {
   if (!content.rosters || typeof content.rosters !== 'object' || Array.isArray(content.rosters)) content.rosters = {};
   if (!content.teamPlayers || typeof content.teamPlayers !== 'object' || Array.isArray(content.teamPlayers)) content.teamPlayers = {};
   if (!content.teamPhotos || typeof content.teamPhotos !== 'object' || Array.isArray(content.teamPhotos)) content.teamPhotos = {};
-  content.standings = buildStandingsFromGamesBackend(content.gameSchedules);
+  content.standings = chooseStandings(content.gameSchedules, content.standings);
   if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
   if (typeof content.homepageMessage !== 'string') content.homepageMessage = '';
   return content;
@@ -546,16 +561,15 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
     next.gameScores = Array.isArray(next.gameSchedules)
       ? next.gameSchedules.filter(game => game.score1 !== '' && game.score2 !== '' && game.score1 != null && game.score2 != null)
       : [];
-    next.standings = buildStandingsFromGamesBackend(next.gameSchedules || []);
+    next.standings = chooseStandings(next.gameSchedules || [], incoming.standings || current.standings);
     next.updatedAt = new Date().toISOString();
 
     saveContent(next);
     const nextScheduleSignature = scheduleSignature(next);
-    if (previousScheduleSignature !== nextScheduleSignature && process.env.LAMSL_AUTO_NOTIFY_SCHEDULE_UPDATES !== 'false') {
-      sendScheduleUpdateNotification(next, { automatic: true, reason: 'backend-schedule-change' })
-        .catch(error => logNotification({ type: 'schedule-update', status: 'automatic-send-error', error: error.message }));
+    if (previousScheduleSignature !== nextScheduleSignature) {
+      logNotification({ type: 'schedule-update', status: 'queued-for-scheduled-send', schedule: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
     }
-    res.json({ success: true, content: next, scheduleNotificationQueued: previousScheduleSignature !== nextScheduleSignature });
+    res.json({ success: true, content: next, scheduleNotificationQueued: false, scheduledNotifications: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
   } catch (error) {
     console.error('Content update failed:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -916,6 +930,41 @@ function scheduleSignature(content) {
   return crypto.createHash('sha256').update(JSON.stringify(games.map(g => ({ id: g.id, date: g.date, time: g.time, park: g.park, division: g.division, team1: g.team1, team2: g.team2, status: g.status })))).digest('hex');
 }
 
+
+const NOTIFICATION_STATE_FILE = path.join(logsDir, 'schedule-notification-state.json');
+function getPacificParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(date).reduce((acc, part) => { acc[part.type] = part.value; return acc; }, {});
+  return parts;
+}
+function readNotificationState() {
+  try { return JSON.parse(fs.readFileSync(NOTIFICATION_STATE_FILE, 'utf8')); } catch { return {}; }
+}
+function writeNotificationState(state) {
+  try { fs.writeFileSync(NOTIFICATION_STATE_FILE, JSON.stringify(state, null, 2)); } catch (error) { logNotification({ type: 'schedule-update', status: 'state-write-failed', error: error.message }); }
+}
+async function runScheduledScheduleNotificationCheck() {
+  const parts = getPacificParts();
+  const dayOk = parts.weekday === 'Wed' || parts.weekday === 'Fri';
+  const timeOk = Number(parts.hour) === 9 && Number(parts.minute) === 0;
+  if (!dayOk || !timeOk) return;
+  const key = `${parts.year}-${parts.month}-${parts.day}-${parts.hour}:${parts.minute}`;
+  const state = readNotificationState();
+  if (state.lastScheduleNotificationKey === key) return;
+  state.lastScheduleNotificationKey = key;
+  state.lastAttemptAt = new Date().toISOString();
+  writeNotificationState(state);
+  try {
+    const result = await sendScheduleUpdateNotification(readContent(), { automatic: true, reason: 'wed-fri-9am-scheduled-send', timezone: 'America/Los_Angeles' });
+    writeNotificationState({ ...state, lastResult: { success: result.success, sent: result.sent, failed: result.failed, subscriberCount: result.subscriberCount }, lastCompletedAt: new Date().toISOString() });
+  } catch (error) {
+    logNotification({ type: 'schedule-update', status: 'scheduled-send-error', error: error.message });
+  }
+}
+setInterval(() => { runScheduledScheduleNotificationCheck().catch(error => logNotification({ type: 'schedule-update', status: 'scheduled-check-error', error: error.message })); }, 60 * 1000);
+runScheduledScheduleNotificationCheck().catch(() => {});
+
 app.get('/api/subscribers', requireAdminKey, (req, res) => {
   const subscribers = readSubscribers();
   res.json({ success: true, count: subscribers.length, subscribers: subscribers.map(item => ({ email: item.email, subscribedAt: item.subscribedAt || null })) });
@@ -936,7 +985,8 @@ app.get('/api/notifications/status', (req, res) => {
       passConfigured: !!process.env.SMTP_PASS,
       fromConfigured: !!(process.env.MAIL_FROM || process.env.SMTP_FROM)
     },
-    requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','MAIL_FROM']
+    requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','MAIL_FROM'],
+    scheduledSend: { enabled: true, days: ['Wednesday','Friday'], time: '09:00', timezone: 'America/Los_Angeles' }
   });
 });
 
@@ -959,8 +1009,8 @@ app.post('/api/notifications/send-schedule-update', requireAdminKey, async (req,
 // ===== Notifications legacy aliases =====
 app.post('/notify-schedule-update', requireAdminKey, async (req, res) => {
   try {
-    const result = await sendScheduleUpdateNotification(readContent(), { manual: true, reason: req.body?.reason || 'legacy-notify-schedule-update' });
-    res.status(result.success ? 200 : 400).json(result);
+    logNotification({ type: 'schedule-update', status: 'queued-for-wed-fri-9am', reason: req.body?.reason || 'legacy-notify-schedule-update' });
+    res.json({ success: true, queued: true, scheduledNotifications: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
