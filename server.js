@@ -107,6 +107,8 @@ const uploadDir = path.join(persistentRoot, 'uploads');
 const slideshowDir = path.join(persistentRoot, 'SlideshowImages');
 const logsDir = path.join(persistentRoot, 'logs');
 const efDir = path.join(persistentRoot, 'EFimages');
+const legacyEfDir = path.join(persistentRoot, 'EF_Images');
+const bundledEfDir = path.join(projectRoot, 'EF_Images');
 const dataDir = path.join(persistentRoot, 'data');
 const teamProfileDir = path.join(persistentRoot, 'TeamProfileImages');
 const legacyTeamProfileDir = path.join(persistentRoot, 'teamProfile images');
@@ -125,6 +127,9 @@ if (!fs.existsSync(dataDir)) {
 }
 if (!fs.existsSync(efDir)) {
   fs.mkdirSync(efDir, { recursive: true });
+}
+if (!fs.existsSync(legacyEfDir)) {
+  fs.mkdirSync(legacyEfDir, { recursive: true });
 }
 if (!fs.existsSync(teamProfileDir)) {
   fs.mkdirSync(teamProfileDir, { recursive: true });
@@ -364,7 +369,11 @@ app.get('/slideshow-images', (req, res) => {
 app.use('/TeamProfileImages', express.static(teamProfileDir));
 app.use('/teamProfile images', express.static(legacyTeamProfileDir));
 app.use('/EFimages', express.static(efDir));
+app.use('/EFimages', express.static(legacyEfDir));
+app.use('/EFimages', express.static(bundledEfDir));
+app.use('/EF_Images', express.static(legacyEfDir));
 app.use('/EF_Images', express.static(efDir));
+app.use('/EF_Images', express.static(bundledEfDir));
 
 // Admin action logging endpoint
 app.post('/api/log-admin-action', requireAdminKey, (req, res) => {
@@ -529,11 +538,40 @@ function getMergedHomepageSlideshow(content) {
   });
 }
 
+
+function getMergedEventFundraiserImages(content) {
+  const contentImages = Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages : [];
+  const metaImages = readEfMeta();
+  const diskImages = [];
+  const scanDirs = [
+    { dir: efDir, prefix: '/EFimages/' },
+    { dir: legacyEfDir, prefix: '/EF_Images/' },
+    { dir: bundledEfDir, prefix: '/EF_Images/' }
+  ];
+  scanDirs.forEach(({ dir, prefix }) => {
+    try {
+      if (!fs.existsSync(dir)) return;
+      fs.readdirSync(dir)
+        .filter(name => /\.(jpe?g|png|gif|webp|bmp|svg|apng|avif|ico|jfif|tiff?|heic|heif)$/i.test(name))
+        .forEach(name => diskImages.push({ filename: name, name, url: prefix + name, path: prefix + name, caption: '' }));
+    } catch (e) {}
+  });
+  const seen = new Set();
+  return [...contentImages, ...metaImages, ...diskImages].filter(img => {
+    const raw = img?.filename || img?.name || img?.url || img?.src || img?.path || '';
+    const key = path.basename(String(raw).replace(/\\/g, '/')).toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 app.get('/api/content', (req, res) => {
   const content = readContent();
   res.json({
     ...content,
     slideshow: getMergedHomepageSlideshow(content),
+    eventFundraiserImages: getMergedEventFundraiserImages(content),
     deploymentVersion: '2026.06.05-stability-single-source-v1'
   });
 });
@@ -609,7 +647,11 @@ const uploadEf = multer({ storage: multer.diskStorage({
 })});
 
 app.get('/ef-images', (req, res) => {
-  const images = readEfMeta();
+  const images = getMergedEventFundraiserImages(readContent());
+  res.json({ success: true, images });
+});
+app.get('/api/ef-images', (req, res) => {
+  const images = getMergedEventFundraiserImages(readContent());
   res.json({ success: true, images });
 });
 
@@ -774,54 +816,6 @@ function buildScheduleUpdateEmail(content, options = {}) {
 </div><div style="background:#f1f1f1;padding:20px;text-align:center;font-size:12px;color:#666;">LAMSL Support Team<br>lamslsupport@gmail.com<br>https://www.lamsl.com<br><br>You are receiving this email because you subscribed to LAMSL schedule notifications.</div>
 </div></div></body></html>`;
   return { subject, html, text: textLines.join('\n'), games };
-}
-
-
-function sanitizeNotificationRecipients(raw) {
-  const arr = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-  return [...new Set(arr.map(v => String(v || '').trim().toLowerCase()).filter(v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)))];
-}
-
-function buildTeamGameUpdateEmail(game = {}, action = 'updated') {
-  const matchup = `${game.team1 || 'Team 1'} vs ${game.team2 || 'Team 2'}`;
-  const scoreText = game.score1 !== undefined && game.score2 !== undefined && game.score1 !== '' && game.score2 !== ''
-    ? `${game.team1 || 'Team 1'} ${game.score1} - ${game.score2} ${game.team2 || 'Team 2'}`
-    : 'Score not entered yet';
-  const subject = `LAMSL ${action}: ${matchup}`;
-  const text = [
-    'Hello,', '',
-    `A LAMSL team game has been ${action}.`, '',
-    `Game: ${matchup}`,
-    `Date: ${formatEmailDate(game.date)}`,
-    `Time: ${formatEmailTime(game.time)}`,
-    `Park: ${game.park || 'TBD'}`,
-    `Division: ${game.division || 'TBD'}`,
-    `Status: ${game.status || 'scheduled'}`,
-    `Score: ${scoreText}`, '',
-    'View the team schedule and latest scores: https://www.lamsl.com/schedule.html', '',
-    'LAMSL Support Team\nlamslsupport@gmail.com\nhttps://www.lamsl.com'
-  ].join('\n');
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${escapeEmailHtml(subject)}</title></head><body style="font-family:Arial,Helvetica,sans-serif;background:#f4f4f4;color:#222;margin:0;padding:24px;"><div style="max-width:650px;margin:0 auto;background:#fff;border:1px solid #d9d9d9;border-radius:10px;overflow:hidden;"><div style="background:#12324A;color:#fff;padding:22px;text-align:center;"><h1 style="margin:0;font-size:24px;">LAMSL Team Game Update</h1></div><div style="padding:24px;"><p>A LAMSL team game has been <strong>${escapeEmailHtml(action)}</strong>.</p><table style="width:100%;border-collapse:collapse;"><tbody><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Game</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(matchup)}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Date</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(formatEmailDate(game.date))}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Time</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(formatEmailTime(game.time))}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Park</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(game.park || 'TBD')}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Division</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(game.division || 'TBD')}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;">Status</td><td style="padding:8px;border-bottom:1px solid #eee;">${escapeEmailHtml(game.status || 'scheduled')}</td></tr><tr><td style="padding:8px;font-weight:bold;">Score</td><td style="padding:8px;">${escapeEmailHtml(scoreText)}</td></tr></tbody></table><p style="margin-top:24px;"><a href="https://www.lamsl.com/schedule.html" style="background:#12324A;color:#fff;text-decoration:none;padding:12px 18px;border-radius:6px;font-weight:bold;">View Schedule</a></p></div><div style="background:#f1f1f1;padding:16px;text-align:center;font-size:12px;color:#666;">LAMSL Support Team<br>lamslsupport@gmail.com<br>https://www.lamsl.com</div></div></body></html>`;
-  return { subject, html, text };
-}
-
-async function sendTeamGameUpdateNotification(game, action, recipients) {
-  const list = sanitizeNotificationRecipients(recipients);
-  const result = { success: true, configured: smtpConfigured(), recipientCount: list.length, sent: 0, failed: 0 };
-  if (!list.length) return result;
-  if (!smtpConfigured()) {
-    result.success = false;
-    result.error = 'SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and MAIL_FROM in Render.';
-    logNotification({ type: 'team-game-update', status: 'preview-only-smtp-not-configured', recipientCount: list.length, action, game });
-    return result;
-  }
-  const email = buildTeamGameUpdateEmail(game, action);
-  for (const to of list) {
-    try { await sendSmtpEmail({ to, subject: email.subject, html: email.html, text: email.text }); result.sent += 1; }
-    catch (error) { result.failed += 1; logNotification({ type: 'team-game-update', status: 'send-failed', to, error: error.message }); }
-  }
-  logNotification({ type: 'team-game-update', status: 'sent', recipientCount: list.length, sent: result.sent, failed: result.failed, action, game });
-  return result;
 }
 
 function smtpConfigured() {
@@ -1057,12 +1051,6 @@ app.post('/api/notifications/send-schedule-update', requireAdminKey, async (req,
 // ===== Notifications legacy aliases =====
 app.post('/notify-schedule-update', requireAdminKey, async (req, res) => {
   try {
-    const recipients = sanitizeNotificationRecipients(req.body?.recipients || []);
-    if (recipients.length) {
-      const result = await sendTeamGameUpdateNotification(req.body?.game || {}, req.body?.action || 'updated', recipients);
-      res.status(result.success ? 200 : 400).json(result);
-      return;
-    }
     logNotification({ type: 'schedule-update', status: 'queued-for-wed-fri-9am', reason: req.body?.reason || 'legacy-notify-schedule-update' });
     res.json({ success: true, queued: true, scheduledNotifications: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -1199,7 +1187,7 @@ app.post('/api/team-metadata', requireAdminKey, (req, res) => {
 // ===== Roster data =====
 app.get('/api/rosters', (req, res) => {
   const content = readContent();
-  res.json({ success: true, rosters: content.rosters || {}, teamPlayers: content.teamPlayers || {}, teamSubscribers: content.teamSubscribers || {} });
+  res.json({ success: true, rosters: content.rosters || {}, teamPlayers: content.teamPlayers || {} });
 });
 
 app.post('/api/rosters', requireTeamContentAuth, (req, res) => {
@@ -1208,10 +1196,9 @@ app.post('/api/rosters', requireTeamContentAuth, (req, res) => {
     const incoming = req.body || {};
     content.rosters = incoming.rosters && typeof incoming.rosters === 'object' ? incoming.rosters : (content.rosters || {});
     content.teamPlayers = incoming.teamPlayers && typeof incoming.teamPlayers === 'object' ? incoming.teamPlayers : (content.teamPlayers || {});
-    content.teamSubscribers = incoming.teamSubscribers && typeof incoming.teamSubscribers === 'object' ? incoming.teamSubscribers : (content.teamSubscribers || {});
     content.updatedAt = new Date().toISOString();
     writeContent(content);
-    res.json({ success: true, rosters: content.rosters, teamPlayers: content.teamPlayers, teamSubscribers: content.teamSubscribers || {} });
+    res.json({ success: true, rosters: content.rosters, teamPlayers: content.teamPlayers });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
