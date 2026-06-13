@@ -236,55 +236,78 @@ app.post('/api/subscribe', (req, res) => {
 
 // Image upload endpoint
 function getImageDestination(req) {
-  const raw = String((req.body && (req.body.destination || req.body.target || req.body.imageType)) || 'homepage').toLowerCase();
-  if (['event', 'events', 'fundraiser', 'fundraisers', 'ef', 'efimages'].includes(raw)) return 'events';
+  const raw = String((req.body && (req.body.destination || req.body.target || req.body.imageType)) || req.query?.destination || 'homepage').toLowerCase();
+  if (['event', 'events', 'events/fundraisers', 'events / fundraisers', 'fundraiser', 'fundraisers', 'ef', 'efimages', 'ef_images'].includes(raw)) return 'events';
   return 'homepage';
 }
 
-const upload = multer({ storage: multer.diskStorage({
-  destination: (req, file, cb) => {
-    const destination = getImageDestination(req);
-    cb(null, destination === 'events' ? efDir : slideshowDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '') || '';
-    const safeBase = path.basename(file.originalname || 'image', ext).replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40) || 'image';
-    cb(null, `${Date.now()}-${safeBase}${ext}`);
-  }
-})});
+function safeUploadName(originalName = 'image.jpg') {
+  const ext = path.extname(originalName || '') || '.jpg';
+  const safeBase = path.basename(originalName || 'image', ext)
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'image';
+  return `${Date.now()}-${safeBase}${ext}`;
+}
+
+function writeUploadedImage(buffer, folder, filename) {
+  fs.mkdirSync(folder, { recursive: true });
+  const fullPath = path.join(folder, filename);
+  fs.writeFileSync(fullPath, buffer);
+  return fullPath;
+}
+
+// Use memory storage so the destination form field is always available before deciding
+// which slideshow folder receives the file. This prevents Event/Fundraiser uploads from
+// being accidentally saved to the homepage slideshow folder when multipart field order changes.
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+    if (!req.file || !req.file.buffer) return res.status(400).json({ success: false, message: 'No file uploaded' });
     const destination = getImageDestination(req);
-    const publicFolder = destination === 'events' ? '/EFimages/' : '/SlideshowImages/';
-    const url = publicFolder + req.file.filename;
+    const filename = safeUploadName(req.file.originalname || 'image.jpg');
     const content = readContent();
+    const uploadedAt = new Date().toISOString();
+    let url = '';
+
+    if (destination === 'events') {
+      // Canonical Events/Fundraisers slideshow folder is EFimages on the Render disk.
+      // A compatibility copy is also written to EF_Images because older pages/scripts used that folder name.
+      writeUploadedImage(req.file.buffer, efDir, filename);
+      try { writeUploadedImage(req.file.buffer, legacyEfDir, filename); } catch (copyError) { console.warn('EF_Images compatibility copy failed:', copyError.message); }
+      url = '/EFimages/' + filename;
+    } else {
+      writeUploadedImage(req.file.buffer, slideshowDir, filename);
+      url = '/SlideshowImages/' + filename;
+    }
+
     const imageRecord = {
       url,
       src: url,
       path: url,
-      filename: req.file.filename,
+      filename,
+      name: filename,
       originalName: req.file.originalname || '',
       caption: String(req.body.caption || '').trim(),
       destination,
-      uploadedAt: new Date().toISOString()
+      uploadedAt
     };
 
     if (destination === 'events') {
       content.eventFundraiserImages = Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages : [];
       content.eventFundraiserImages.unshift(imageRecord);
       const meta = readEfMeta();
-      meta.unshift({ name: req.file.filename, path: url, url, caption: imageRecord.caption, uploadedAt: imageRecord.uploadedAt });
+      meta.unshift({ name: filename, filename, path: url, url, caption: imageRecord.caption, uploadedAt });
       writeEfMeta(meta);
     } else {
       content.slideshow = Array.isArray(content.slideshow) ? content.slideshow : [];
       content.slideshow.unshift(imageRecord);
     }
 
-    content.updatedAt = new Date().toISOString();
+    content.updatedAt = uploadedAt;
     writeContent(content);
-    res.json({ success: true, destination, url, image: imageRecord, content });
+    res.json({ success: true, destination, folder: destination === 'events' ? 'EFimages' : 'SlideshowImages', url, image: imageRecord, content });
   } catch (error) {
     console.error('Image upload failed:', error);
     res.status(500).json({ success: false, error: error.message });
