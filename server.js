@@ -617,10 +617,11 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
 
 // ===== EF Images (Events) =====
 const efMetaFile = path.join(dataDir, 'ef_images_metadata.json');
-function readEfMeta() {
+const legacyEfMetaFile = path.join(projectRoot, 'ef_images_metadata.json');
+function parseEfMetaFile(filePath) {
   try {
-    if (!fs.existsSync(efMetaFile)) return [];
-    const parsed = JSON.parse(fs.readFileSync(efMetaFile, 'utf8'));
+    if (!fs.existsSync(filePath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     if (Array.isArray(parsed)) return parsed;
     if (parsed && typeof parsed === 'object') {
       return Object.entries(parsed).map(([name, value]) => ({
@@ -633,6 +634,15 @@ function readEfMeta() {
     }
     return [];
   } catch (e) { return []; }
+}
+function readEfMeta() {
+  const seen = new Set();
+  return [...parseEfMetaFile(efMetaFile), ...parseEfMetaFile(legacyEfMetaFile)].filter(item => {
+    const key = String(item?.filename || item?.name || item?.url || item?.path || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 function writeEfMeta(arr) {
   try { fs.writeFileSync(efMetaFile, JSON.stringify(arr, null, 2)); } catch (e) {}
