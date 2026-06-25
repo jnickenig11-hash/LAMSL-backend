@@ -929,7 +929,18 @@ async function sendTeamGameUpdateNotification(game, action, recipients) {
 }
 
 function smtpConfigured() {
-  return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && (process.env.MAIL_FROM || process.env.SMTP_FROM));
+  return !!(process.env.SMTP_HOST && getSmtpUser() && getSmtpPass() && (process.env.MAIL_FROM || process.env.SMTP_FROM));
+}
+
+function getSmtpUser() {
+  return String(process.env.SMTP_USER || '').trim();
+}
+
+function getSmtpPass() {
+  const raw = String(process.env.SMTP_PASS || '').trim();
+  const host = String(process.env.SMTP_HOST || '').toLowerCase();
+  if (host.includes('gmail') && /\s/.test(raw)) return raw.replace(/\s+/g, '');
+  return raw;
 }
 
 function readSmtpResponse(socket) {
@@ -1034,7 +1045,7 @@ async function sendSmtpEmail({ to, subject, html, text }) {
       socket = await upgradeSmtpSocketToTls(socket);
       await smtpCommand(socket, `EHLO ${process.env.SMTP_EHLO_DOMAIN || 'lamsl.com'}`);
     }
-    await smtpCommand(socket, `AUTH PLAIN ${Buffer.from(`\0${process.env.SMTP_USER}\0${process.env.SMTP_PASS}`).toString('base64')}`);
+    await smtpCommand(socket, `AUTH PLAIN ${Buffer.from(`\0${getSmtpUser()}\0${getSmtpPass()}`).toString('base64')}`);
     await smtpCommand(socket, `MAIL FROM:<${from.match(/<([^>]+)>/)?.[1] || from}>`);
     await smtpCommand(socket, `RCPT TO:<${to}>`);
     await smtpCommand(socket, 'DATA', /^3/);
@@ -1048,6 +1059,31 @@ async function sendSmtpEmail({ to, subject, html, text }) {
 
 function logNotification(entry) {
   fs.appendFileSync(path.join(logsDir, 'notifications.log'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
+}
+
+function getLatestScheduleFailureFromLog() {
+  const file = path.join(logsDir, 'notifications.log');
+  try {
+    if (!fs.existsSync(file)) return null;
+    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry?.type === 'schedule-update' && entry?.status === 'send-failed') {
+          return {
+            ts: entry.ts || null,
+            error: entry.error || 'Unknown send failure',
+            to: entry.to || null
+          };
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+  } catch (error) {
+    return { ts: null, error: `Unable to read notification log: ${error.message}`, to: null };
+  }
+  return null;
 }
 
 async function sendScheduleUpdateNotification(content, options = {}) {
@@ -1070,8 +1106,14 @@ async function sendScheduleUpdateNotification(content, options = {}) {
       result.sent += 1;
     } catch (error) {
       result.failed += 1;
+      result.lastError = error.message;
+      result.lastFailedRecipient = subscriber.email;
       logNotification({ type: 'schedule-update', status: 'send-failed', to: subscriber.email, error: error.message });
     }
+  }
+  if (result.failed && !result.sent) {
+    result.success = false;
+    result.error = `All ${result.failed} schedule notification email(s) failed. Last error: ${result.lastError || 'Unknown error'}`;
   }
   logNotification({ type: 'schedule-update', status: 'sent', subscriberCount: subscribers.length, sent: result.sent, failed: result.failed, automatic: !!options.automatic });
   return result;
@@ -1145,7 +1187,7 @@ app.get('/api/notifications/status', (req, res) => {
 app.get('/api/notifications/schedule-preview', requireAdminKey, (req, res) => {
   const content = readContent();
   const preview = buildScheduleUpdateEmail(content, { limit: Number(req.query.limit || 5) });
-  res.json({ success: true, subscriberCount: readSubscribers().length, smtpConfigured: smtpConfigured(), preview });
+  res.json({ success: true, subscriberCount: readSubscribers().length, smtpConfigured: smtpConfigured(), preview, lastFailure: getLatestScheduleFailureFromLog() });
 });
 
 app.post('/api/notifications/send-schedule-update', requireAdminKey, async (req, res) => {
