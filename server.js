@@ -504,12 +504,12 @@ function sanitizeTeamPlayersList(players) {
   return list.map((p, index) => ({
     id: String(p.id || `${Date.now()}-${index}`),
     name: String(p.name || p.Name || '').trim(),
-    position: String(p.position || p.Position || '').trim(),
+    position: String(p.position || p.Position || '').trim() || 'TBA',
     phone: String(p.phone || p.Phone || '').trim(),
     email: String(p.email || p.Email || '').trim(),
     gamesPlayed: Number(p.gamesPlayed || p.GamesPlayed || 0) || 0,
     photo: String(p.photo || p.Photo || '').trim()
-  })).filter(p => p.name && p.position).slice(0, MAX_TEAM_ROSTER_PLAYERS);
+  })).filter(p => p.name).slice(0, MAX_TEAM_ROSTER_PLAYERS);
 }
 
 function sanitizeTeamPlayersStore(store) {
