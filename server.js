@@ -23,6 +23,7 @@ app.use((req, res, next) => {
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 const SESSION_SECRET = process.env.LAMSL_SESSION_SECRET || ADMIN_API_KEY || 'lamsl-dev-session-secret';
+const MAX_TEAM_ROSTER_PLAYERS = 16;
 console.log('ADMIN_API_KEY loaded:', !!ADMIN_API_KEY);
 
 function getBearerToken(req) {
@@ -496,6 +497,33 @@ function normalizeContent(raw) {
   if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
   if (typeof content.homepageMessage !== 'string') content.homepageMessage = '';
   return content;
+}
+
+function sanitizeTeamPlayersList(players) {
+  const list = Array.isArray(players) ? players : [];
+  return list.map((p, index) => ({
+    id: String(p.id || `${Date.now()}-${index}`),
+    name: String(p.name || p.Name || '').trim(),
+    position: String(p.position || p.Position || '').trim(),
+    phone: String(p.phone || p.Phone || '').trim(),
+    email: String(p.email || p.Email || '').trim(),
+    gamesPlayed: Number(p.gamesPlayed || p.GamesPlayed || 0) || 0,
+    photo: String(p.photo || p.Photo || '').trim()
+  })).filter(p => p.name && p.position).slice(0, MAX_TEAM_ROSTER_PLAYERS);
+}
+
+function sanitizeTeamPlayersStore(store) {
+  const source = (store && typeof store === 'object' && !Array.isArray(store)) ? store : {};
+  const next = {};
+  Object.entries(source).forEach(([key, value]) => {
+    const entry = value && typeof value === 'object' ? value : {};
+    next[key] = {
+      ...entry,
+      players: sanitizeTeamPlayersList(entry.players),
+      updatedAt: entry.updatedAt || new Date().toISOString()
+    };
+  });
+  return next;
 }
 
 const contentFile = path.join(dataDir, 'content.json');
@@ -1283,7 +1311,7 @@ app.post('/api/rosters', requireTeamContentAuth, (req, res) => {
     const content = readContent();
     const incoming = req.body || {};
     content.rosters = incoming.rosters && typeof incoming.rosters === 'object' ? incoming.rosters : (content.rosters || {});
-    content.teamPlayers = incoming.teamPlayers && typeof incoming.teamPlayers === 'object' ? incoming.teamPlayers : (content.teamPlayers || {});
+    content.teamPlayers = sanitizeTeamPlayersStore(incoming.teamPlayers && typeof incoming.teamPlayers === 'object' ? incoming.teamPlayers : (content.teamPlayers || {}));
     content.teamSubscribers = incoming.teamSubscribers && typeof incoming.teamSubscribers === 'object' ? incoming.teamSubscribers : (content.teamSubscribers || {});
     content.updatedAt = new Date().toISOString();
     writeContent(content);
@@ -1321,15 +1349,7 @@ app.post('/api/team-players', requireTeamContentAuth, (req, res) => {
       }
     }
 
-    const cleaned = players.map((p, index) => ({
-      id: String(p.id || `${Date.now()}-${index}`),
-      name: String(p.name || p.Name || '').trim(),
-      position: String(p.position || p.Position || '').trim(),
-      phone: String(p.phone || p.Phone || '').trim(),
-      email: String(p.email || p.Email || '').trim(),
-      gamesPlayed: Number(p.gamesPlayed || p.GamesPlayed || 0) || 0,
-      photo: String(p.photo || p.Photo || '').trim()
-    })).filter(p => p.name && p.position);
+    const cleaned = sanitizeTeamPlayersList(players);
 
     const content = readContent();
     content.teamPlayers = content.teamPlayers && typeof content.teamPlayers === 'object' && !Array.isArray(content.teamPlayers) ? content.teamPlayers : {};
