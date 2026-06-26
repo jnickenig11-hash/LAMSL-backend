@@ -228,6 +228,40 @@ app.post('/api/reset-password', (req, res) => {
   res.json({ success: true, message: 'Password updated successfully.' });
 });
 
+app.post('/api/claim-account', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+  
+  if (!username || !email || !password) {
+    return res.status(400).json({ success: false, error: 'username, email, and password required' });
+  }
+  
+  if (password.length < 6) {
+    return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+  }
+  
+  const users = readUsers();
+  const user = users.find(u => String(u.username || '') === username);
+  
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'User account not found' });
+  }
+  
+  // Only allow claiming accounts without email
+  if (user.email && user.email.trim() !== '') {
+    return res.status(400).json({ success: false, error: 'This account already has an email address associated with it' });
+  }
+  
+  // Update user with email and password
+  user.email = email;
+  user.password = password;
+  user.claimedAt = new Date().toISOString();
+  writeUsers(users);
+  
+  res.json({ success: true, message: 'Account claimed successfully! You can now log in with your new password.' });
+});
+
 
 app.get('/api/users', requireAdminKey, (req,res)=>{
   const users=readUsers().map(u=>({...u,password:'********'}));
