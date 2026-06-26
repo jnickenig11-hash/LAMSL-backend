@@ -167,6 +167,67 @@ app.post('/api/login', (req, res) => {
   res.json({ success: true, username: user.username, role, assignedTeam, assignedDivision, token, expiresInHours: 12 });
 });
 
+// Password reset storage (in-memory, expires after 1 hour)
+const resetTokens = new Map();
+function generateTempPassword() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let pwd = '';
+  for (let i = 0; i < 8; i++) pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+  return pwd;
+}
+
+app.post('/api/forgot-password', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!username || !email) return res.status(400).json({ success: false, error: 'username and email required' });
+  
+  const users = readUsers();
+  const user = users.find(u => String(u.username || '') === username && String(u.email || '').toLowerCase() === email);
+  if (!user) return res.status(404).json({ success: false, error: 'User not found or email does not match.' });
+  
+  const tempPassword = generateTempPassword();
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
+  resetTokens.set(token, { username, tempPassword, expiresAt });
+  
+  // Auto-cleanup expired tokens periodically
+  setTimeout(() => {
+    if (resetTokens.has(token) && Date.now() > expiresAt) {
+      resetTokens.delete(token);
+    }
+  }, 60 * 60 * 1000);
+  
+  res.json({ 
+    success: true, 
+    message: 'Password reset initiated. Temporary password will be sent to your email.',
+    tempPassword: tempPassword, // In production, send via email instead
+    token: token
+  });
+});
+
+app.post('/api/reset-password', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const tempPassword = String(req.body?.tempPassword || '');
+  const newPassword = String(req.body?.newPassword || '');
+  if (!username || !tempPassword || !newPassword) return res.status(400).json({ success: false, error: 'username, tempPassword, and newPassword required' });
+  
+  const users = readUsers();
+  const user = users.find(u => String(u.username || '') === username);
+  if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+  
+  // Verify temp password matches
+  if (String(user.password || '') !== tempPassword) {
+    return res.status(401).json({ success: false, error: 'Invalid temporary password' });
+  }
+  
+  // Update to new password
+  user.password = newPassword;
+  user.passwordChangedAt = new Date().toISOString();
+  writeUsers(users);
+  
+  res.json({ success: true, message: 'Password updated successfully.' });
+});
+
 
 app.get('/api/users', requireAdminKey, (req,res)=>{
   const users=readUsers().map(u=>({...u,password:'********'}));
@@ -178,7 +239,7 @@ app.post('/api/users', requireAdminKey, (req,res)=>{
   const payload=req.body||{};
   if(!payload.username || !payload.password) return res.status(400).json({success:false,error:'username and password required'});
   const existing=users.findIndex(u=>u.username===payload.username);
-  const record={username:payload.username,password:payload.password,role:payload.role||'user',assignedTeam:payload.assignedTeam||payload.team||'',assignedDivision:payload.assignedDivision||payload.division||''};
+  const record={username:payload.username,password:payload.password,role:payload.role||'user',email:payload.email||'',assignedTeam:payload.assignedTeam||payload.team||'',assignedDivision:payload.assignedDivision||payload.division||''};
   if(existing>=0) users[existing]=record;
   else users.push(record);
   writeUsers(users);
@@ -199,6 +260,7 @@ app.put('/api/users/:username', requireAdminKey, (req,res)=>{
     username,
     role: payload.role || users[existing].role || 'user',
     password: payload.password ? payload.password : users[existing].password,
+    email: payload.email !== undefined ? payload.email : (users[existing].email || ''),
     assignedTeam: payload.assignedTeam !== undefined ? payload.assignedTeam : (payload.team !== undefined ? payload.team : (users[existing].assignedTeam || users[existing].team || '')),
     assignedDivision: payload.assignedDivision !== undefined ? payload.assignedDivision : (payload.division !== undefined ? payload.division : (users[existing].assignedDivision || users[existing].division || ''))
   };
