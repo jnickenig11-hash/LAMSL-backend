@@ -11,6 +11,7 @@ import tls from 'tls';
 const app = express();
 app.use(express.json());
 app.use(cors());
+
 // LAMSL no-store: dynamic API/file listing responses must not be cached by browsers/CDNs.
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/') || req.path === '/slideshow-images' || req.path === '/ef-images') {
@@ -138,6 +139,29 @@ if (!fs.existsSync(teamProfileDir)) {
 if (!fs.existsSync(legacyTeamProfileDir)) {
   fs.mkdirSync(legacyTeamProfileDir, { recursive: true });
 }
+
+
+// Serve static files from project root (frontend HTML, CSS, JS, images, etc.)
+app.use(express.static(projectRoot, {
+  maxAge: '1h',
+  etag: false,
+  skip: (req, res) => {
+    // Skip serving backend, node_modules, and git directories
+    const p = req.path;
+    if (p.startsWith('/backend/') || p.startsWith('/node_modules/') || p.startsWith('/.git')) {
+      return true;
+    }
+    return false;
+  },
+  setHeaders: (res, filePath) => {
+    // Don't cache HTML and JSON files to ensure latest content is served
+    if (filePath.endsWith('.html') || filePath.endsWith('.json')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 
 const usersFile = path.join(dataDir, 'users.json');
