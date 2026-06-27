@@ -24,7 +24,7 @@ app.use((req, res, next) => {
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 const SESSION_SECRET = process.env.LAMSL_SESSION_SECRET || ADMIN_API_KEY || 'lamsl-dev-session-secret';
-const MAX_TEAM_ROSTER_PLAYERS = 16;
+const MAX_TEAM_ROSTER_PLAYERS = 18;
 console.log('ADMIN_API_KEY loaded:', !!ADMIN_API_KEY);
 
 function getBearerToken(req) {
