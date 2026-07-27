@@ -774,9 +774,9 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
     saveContent(next);
     const nextScheduleSignature = scheduleSignature(next);
     if (previousScheduleSignature !== nextScheduleSignature) {
-      logNotification({ type: 'schedule-update', status: 'queued-for-scheduled-send', schedule: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
+      logNotification({ type: 'schedule-update', status: 'queued-for-scheduled-send', schedule: 'Thursday at 9:00 AM America/Los_Angeles' });
     }
-    res.json({ success: true, content: next, scheduleNotificationQueued: false, scheduledNotifications: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
+    res.json({ success: true, content: next, scheduleNotificationQueued: false, scheduledNotifications: 'Thursday at 9:00 AM America/Los_Angeles' });
   } catch (error) {
     console.error('Content update failed:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -1257,7 +1257,7 @@ function writeNotificationState(state) {
 }
 async function runScheduledScheduleNotificationCheck() {
   const parts = getPacificParts();
-  const dayOk = parts.weekday === 'Wed' || parts.weekday === 'Fri';
+  const dayOk = parts.weekday === 'Thu';
   const timeOk = Number(parts.hour) === 9 && Number(parts.minute) === 0;
   if (!dayOk || !timeOk) return;
   const key = `${parts.year}-${parts.month}-${parts.day}-${parts.hour}:${parts.minute}`;
@@ -1267,7 +1267,7 @@ async function runScheduledScheduleNotificationCheck() {
   state.lastAttemptAt = new Date().toISOString();
   writeNotificationState(state);
   try {
-    const result = await sendScheduleUpdateNotification(readContent(), { automatic: true, reason: 'wed-fri-9am-scheduled-send', timezone: 'America/Los_Angeles' });
+    const result = await sendScheduleUpdateNotification(readContent(), { automatic: true, reason: 'thu-9am-scheduled-send', timezone: 'America/Los_Angeles' });
     writeNotificationState({ ...state, lastResult: { success: result.success, sent: result.sent, failed: result.failed, subscriberCount: result.subscriberCount }, lastCompletedAt: new Date().toISOString() });
   } catch (error) {
     logNotification({ type: 'schedule-update', status: 'scheduled-send-error', error: error.message });
@@ -1297,7 +1297,7 @@ app.get('/api/notifications/status', (req, res) => {
       fromConfigured: !!(process.env.MAIL_FROM || process.env.SMTP_FROM)
     },
     requiredVariables: ['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','MAIL_FROM'],
-    scheduledSend: { enabled: true, days: ['Wednesday','Friday'], time: '09:00', timezone: 'America/Los_Angeles' }
+    scheduledSend: { enabled: true, days: ['Thursday'], time: '09:00', timezone: 'America/Los_Angeles' }
   });
 });
 
@@ -1326,8 +1326,8 @@ app.post('/notify-schedule-update', requireAdminKey, async (req, res) => {
       res.status(result.success ? 200 : 400).json(result);
       return;
     }
-    logNotification({ type: 'schedule-update', status: 'queued-for-wed-fri-9am', reason: req.body?.reason || 'legacy-notify-schedule-update' });
-    res.json({ success: true, queued: true, scheduledNotifications: 'Wednesday and Friday at 9:00 AM America/Los_Angeles' });
+    logNotification({ type: 'schedule-update', status: 'queued-for-thu-9am', reason: req.body?.reason || 'legacy-notify-schedule-update' });
+    res.json({ success: true, queued: true, scheduledNotifications: 'Thursday at 9:00 AM America/Los_Angeles' });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
