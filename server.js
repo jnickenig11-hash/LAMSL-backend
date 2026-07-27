@@ -771,7 +771,7 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
     next.gameScores = Array.isArray(next.gameSchedules)
       ? next.gameSchedules.filter(game => game.score1 !== '' && game.score2 !== '' && game.score1 != null && game.score2 != null)
       : [];
-    next.standings = chooseStandings(next.gameSchedules || [], incoming.standings || current.standings);
+    next.standings = chooseStandings(next.gameSchedules || [], Object.prototype.hasOwnProperty.call(incoming, 'standings') ? incoming.standings : undefined);
     next.updatedAt = new Date().toISOString();
 
     saveContent(next);
