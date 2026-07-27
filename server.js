@@ -597,10 +597,7 @@ function allScheduledGamesScored(games) {
   return validGames.length > 0 && validGames.every(hasFinalScore);
 }
 function chooseStandings(games, existingStandings) {
-  const computed = buildStandingsFromGamesBackend(games || []);
-  if (allScheduledGamesScored(games || [])) return computed;
-  if (existingStandings && typeof existingStandings === 'object' && Object.keys(existingStandings).length) return existingStandings;
-  return computed;
+  return buildStandingsFromGamesBackend(games || []);
 }
 
 function normalizeContent(raw) {
