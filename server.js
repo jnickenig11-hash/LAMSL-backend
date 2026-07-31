@@ -481,7 +481,20 @@ function deleteManagedImageHandler(req, res) {
       removedReference = before !== content.slideshow.length;
     }
 
-    if (fs.existsSync(fullPath)) {
+    if (info.destination === 'events') {
+      // Event/fundraiser uploads may exist in multiple compatibility folders.
+      [efDir, legacyEfDir, uploadDir].forEach(folder => {
+        try {
+          const target = path.resolve(folder, info.filename);
+          const root = path.resolve(folder) + path.sep;
+          if (!target.startsWith(root)) return;
+          if (fs.existsSync(target)) {
+            fs.unlinkSync(target);
+            removedFile = true;
+          }
+        } catch (e) {}
+      });
+    } else if (fs.existsSync(fullPath)) {
       fs.unlinkSync(fullPath);
       removedFile = true;
     }
@@ -622,6 +635,20 @@ function sanitizeTeamPlayersList(players) {
     id: String(p.id || `${Date.now()}-${index}`),
     name: String(p.name || p.Name || '').trim(),
     position: String(p.position || p.Position || '').trim() || 'TBA',
+    playerNumber: String(
+      p.playerNumber ||
+      p.PlayerNumber ||
+      p['Player Number'] ||
+      p['Player #'] ||
+      p.number ||
+      p.Number ||
+      p.jerseyNumber ||
+      p.JerseyNumber ||
+      p['Jersey Number'] ||
+      p['Jersey #'] ||
+      p.Jersey ||
+      ''
+    ).trim(),
     phone: String(p.phone || p.Phone || '').trim(),
     email: String(p.email || p.Email || '').trim(),
     gamesPlayed: Number(p.gamesPlayed || p.GamesPlayed || 0) || 0,
@@ -708,31 +735,47 @@ function getMergedHomepageSlideshow(content) {
 
 
 function getMergedEventFundraiserImages(content) {
-  const contentImages = Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages : [];
-  const metaImages = readEfMeta();
-  const diskImages = [];
-  const scanDirs = [
-    { dir: efDir, prefix: '/EFimages/' },
-    { dir: legacyEfDir, prefix: '/EF_Images/' },
-    { dir: bundledEfDir, prefix: '/EF_Images/' },
-    { dir: uploadDir, prefix: '/uploads/' }
+  const contentImages = (Array.isArray(content.eventFundraiserImages) ? content.eventFundraiserImages : []).map(item => ({
+    ...item,
+    source: item?.source || 'content'
+  }));
+  const metaImages = readEfMeta().map(item => ({ ...item, source: 'metadata' }));
+  const diskManagedImages = [];
+  const diskBundledImages = [];
+  const managedScanDirs = [
+    { dir: efDir, prefix: '/EFimages/', source: 'disk-efimages' },
+    { dir: legacyEfDir, prefix: '/EF_Images/', source: 'disk-legacy-ef-images' },
+    { dir: uploadDir, prefix: '/uploads/', source: 'disk-uploads' }
   ];
-  scanDirs.forEach(({ dir, prefix }) => {
+  managedScanDirs.forEach(({ dir, prefix, source }) => {
     try {
       if (!fs.existsSync(dir)) return;
       fs.readdirSync(dir)
         .filter(name => /\.(jpe?g|png|gif|webp|bmp|svg|apng|avif|ico|jfif|tiff?|heic|heif)$/i.test(name))
-        .forEach(name => diskImages.push({ filename: name, name, url: prefix + name, path: prefix + name, caption: '' }));
+        .forEach(name => diskManagedImages.push({ filename: name, name, url: prefix + name, path: prefix + name, caption: '', source }));
     } catch (e) {}
   });
+  try {
+    if (fs.existsSync(bundledEfDir)) {
+      fs.readdirSync(bundledEfDir)
+        .filter(name => /\.(jpe?g|png|gif|webp|bmp|svg|apng|avif|ico|jfif|tiff?|heic|heif)$/i.test(name))
+        .forEach(name => diskBundledImages.push({ filename: name, name, url: '/EF_Images/' + name, path: '/EF_Images/' + name, caption: '', source: 'bundled-fallback' }));
+    }
+  } catch (e) {}
+
+  // Prefer managed uploads + metadata. Only include bundled fallback when no managed images exist.
+  const primaryImages = [...contentImages, ...metaImages, ...diskManagedImages];
   const seen = new Set();
-  return [...contentImages, ...metaImages, ...diskImages].filter(img => {
+  const dedupe = arr => arr.filter(img => {
     const raw = img?.filename || img?.name || img?.url || img?.src || img?.path || '';
     const key = path.basename(String(raw).replace(/\\/g, '/')).toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  const managedUnique = dedupe(primaryImages);
+  if (managedUnique.length) return managedUnique;
+  return dedupe(diskBundledImages);
 }
 
 app.get('/api/content', (req, res) => {
@@ -854,8 +897,11 @@ app.post('/remove-ef-photo', requireAdminKey, express.json(), (req, res) => {
     const { filename } = req.body || {};
     if (!filename) return res.status(400).json({ success: false, error: 'No filename' });
     const info = getManagedImageInfo({ filename, destination: 'events' });
-    const full = path.resolve(info.folder, info.filename);
-    if (fs.existsSync(full)) fs.unlinkSync(full);
+    [efDir, legacyEfDir, uploadDir].forEach(folder => {
+      const full = path.resolve(folder, info.filename);
+      const root = path.resolve(folder) + path.sep;
+      if (full.startsWith(root) && fs.existsSync(full)) fs.unlinkSync(full);
+    });
     const meta = readEfMeta().filter(i => !sameManagedImage(i, info));
     writeEfMeta(meta);
     const content = readContent();
@@ -1383,6 +1429,51 @@ const teamMetaFile = path.join(dataDir, 'team_profile_metadata.json');
 function readTeamMeta() { try { return fs.existsSync(teamMetaFile) ? JSON.parse(fs.readFileSync(teamMetaFile, 'utf8')) : {}; } catch (e) { return {}; } }
 function writeTeamMeta(m) { try { fs.writeFileSync(teamMetaFile, JSON.stringify(m, null, 2)); } catch (e) {} }
 
+function normalizeTeamPhotoRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const raw = String(record.url || record.path || '').trim();
+  if (!raw) return null;
+
+  if (/^https?:\/\//i.test(raw)) {
+    return { ...record, url: raw, path: raw };
+  }
+
+  const cleaned = raw.startsWith('/') ? raw : `/${raw}`;
+  return {
+    ...record,
+    url: cleaned,
+    path: cleaned
+  };
+}
+
+function normalizeLegacyTeamPhotoRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const legacyRelativePath = String(record.relative_path || '').trim().replace(/^\/+/, '');
+  if (!legacyRelativePath) return normalizeTeamPhotoRecord(record);
+
+  const cleaned = `/teamProfile images/${legacyRelativePath}`;
+  return {
+    ...record,
+    url: cleaned,
+    path: cleaned
+  };
+}
+
+function getTeamPhotoKeys(team, division) {
+  const keys = [];
+  const normalizedTeam = String(team || '').trim();
+  const lowerTeam = normalizedTeam.toLowerCase();
+  const normalizedDivision = String(division || '').trim().toUpperCase();
+  const compositeKey = normalizedDivision && lowerTeam ? `${normalizedDivision}__${lowerTeam}` : '';
+
+  [normalizedTeam, lowerTeam, compositeKey, compositeKey.replace(/__+$/g, '')].forEach(key => {
+    const value = String(key || '').trim();
+    if (value && !keys.includes(value)) keys.push(value);
+  });
+
+  return keys;
+}
+
 function handleTeamPhotoUpload(req, res) {
   uploadTeam.single('photo')(req, res, (uploadError) => {
     try {
@@ -1405,8 +1496,14 @@ function handleTeamPhotoUpload(req, res) {
       };
 
       const meta = readTeamMeta();
-      meta[team] = Array.isArray(meta[team]) ? meta[team] : [];
-      meta[team].unshift(record);
+      const lookupKeys = getTeamPhotoKeys(team, division);
+      lookupKeys.forEach((key) => {
+        const existing = meta[key];
+        const existingList = Array.isArray(existing)
+          ? existing
+          : (existing ? [existing] : []);
+        meta[key] = [record, ...existingList.map(item => normalizeLegacyTeamPhotoRecord(item) || normalizeTeamPhotoRecord(item)).filter(Boolean)];
+      });
       writeTeamMeta(meta);
 
       const content = readContent();
@@ -1426,25 +1523,31 @@ app.post('/upload-team-photo', requireTeamContentAuth, handleTeamPhotoUpload);
 app.post('/api/upload-team-photo', requireTeamContentAuth, handleTeamPhotoUpload);
 
 
-function getTeamPhotoRecord(team) {
+function getTeamPhotoRecord(team, division) {
   const content = readContent();
-  if (content.teamPhotos && content.teamPhotos[team]) return normalizeTeamPhotoUrl(content.teamPhotos[team]);
+  if (content.teamPhotos && content.teamPhotos[team]) return normalizeLegacyTeamPhotoRecord(content.teamPhotos[team]) || normalizeTeamPhotoRecord(content.teamPhotos[team]);
   const meta = readTeamMeta();
-  const list = meta[team];
-  if (Array.isArray(list) && list.length) return normalizeTeamPhotoUrl(list[0]);
+  const lookupKeys = getTeamPhotoKeys(team, division);
+  for (const key of lookupKeys) {
+    const list = meta[key];
+    if (Array.isArray(list) && list.length) return normalizeLegacyTeamPhotoRecord(list[0]) || normalizeTeamPhotoRecord(list[0]);
+    if (list && typeof list === 'object') return normalizeLegacyTeamPhotoRecord(list) || normalizeTeamPhotoRecord(list);
+  }
   return null;
 }
 
 app.get('/team-profile-photo', (req, res) => {
   const team = String(req.query.team || '').trim();
+  const division = String(req.query.division || '').trim();
   if (!team) return res.status(400).json({ success: false, error: 'Missing team.' });
-  res.json({ success: true, photo: getTeamPhotoRecord(team) });
+  res.json({ success: true, photo: getTeamPhotoRecord(team, division) });
 });
 
 app.get('/api/team-profile-photo', (req, res) => {
   const team = String(req.query.team || '').trim();
+  const division = String(req.query.division || '').trim();
   if (!team) return res.status(400).json({ success: false, error: 'Missing team.' });
-  res.json({ success: true, photo: getTeamPhotoRecord(team) });
+  res.json({ success: true, photo: getTeamPhotoRecord(team, division) });
 });
 
 app.get('/api/team-metadata', (req, res) => {
