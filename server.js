@@ -27,6 +27,16 @@ const SESSION_SECRET = process.env.LAMSL_SESSION_SECRET || ADMIN_API_KEY || 'lam
 const MAX_TEAM_ROSTER_PLAYERS = 18;
 console.log('ADMIN_API_KEY loaded:', !!ADMIN_API_KEY);
 
+function normalizeRoleName(role) {
+  return String(role || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/^administrator$/, 'admin')
+    .replace(/^manager$/, 'team-manager')
+    .replace(/^team manager$/, 'team-manager');
+}
+
 function getBearerToken(req) {
   const auth = String(req.headers.authorization || '');
   if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
@@ -58,7 +68,7 @@ function verifySessionToken(token) {
 }
 
 function getStaticSession(req) {
-  const role = String(req.headers['x-lamsl-role'] || '').toLowerCase();
+  const role = normalizeRoleName(req.headers['x-lamsl-role']);
   const sessionActive = req.headers['x-lamsl-session'] === 'active';
   const username = String(req.headers['x-lamsl-username'] || 'admin');
   const assignedTeam = String(req.headers['x-lamsl-assigned-team'] || '');
@@ -82,7 +92,7 @@ function requireTeamContentAuth(req, res, next) {
   const token = req.headers['x-admin-key'] || getBearerToken(req);
   if (ADMIN_API_KEY && token === ADMIN_API_KEY) return next();
   if (verifySessionToken(token)) return next();
-  const role = String(req.headers['x-lamsl-role'] || '').toLowerCase();
+  const role = normalizeRoleName(req.headers['x-lamsl-role']);
   const sessionActive = req.headers['x-lamsl-session'] === 'active';
   if (sessionActive && ['admin', 'umpire', 'team-manager'].includes(role)) return next();
   return res.status(403).json({ success: false, error: 'Forbidden: team manager/admin login or API key required' });
@@ -106,6 +116,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const persistentRoot = process.env.LAMSL_STORAGE_DIR || process.env.RENDER_DISK_MOUNT || projectRoot;
 const uploadDir = path.join(persistentRoot, 'uploads');
+const announcementFilesDir = path.join(persistentRoot, 'AnnouncementFiles');
 const slideshowDir = path.join(persistentRoot, 'SlideshowImages');
 const logsDir = path.join(persistentRoot, 'logs');
 const efDir = path.join(persistentRoot, 'EFimages');
@@ -117,6 +128,9 @@ const legacyTeamProfileDir = path.join(persistentRoot, 'teamProfile images');
 const bundledDataDir = path.join(projectRoot, 'data');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+}
+if (!fs.existsSync(announcementFilesDir)) {
+  fs.mkdirSync(announcementFilesDir, { recursive: true });
 }
 if (!fs.existsSync(slideshowDir)) {
   fs.mkdirSync(slideshowDir, { recursive: true });
@@ -383,6 +397,50 @@ function writeUploadedImage(buffer, folder, filename) {
 // being accidentally saved to the homepage slideshow folder when multipart field order changes.
 const upload = multer({ storage: multer.memoryStorage() });
 
+const announcementUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const extension = path.extname(file.originalname || '').toLowerCase();
+    if (!['.pdf', '.xls', '.doc', '.txt'].includes(extension)) {
+      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'attachment'));
+    }
+    cb(null, true);
+  }
+});
+
+app.post('/api/upload-announcement-file', requireAdminKey, announcementUpload.single('attachment'), (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ success: false, error: 'No attachment uploaded.' });
+    }
+
+    const extension = path.extname(req.file.originalname || '').toLowerCase();
+    const filename = safeUploadName(req.file.originalname || `attachment${extension}`);
+    writeUploadedImage(req.file.buffer, announcementFilesDir, filename);
+    res.json({
+      success: true,
+      attachment: {
+        name: req.file.originalname,
+        url: `/AnnouncementFiles/${filename}`,
+        contentType: req.file.mimetype || 'application/octet-stream',
+        size: req.file.size
+      }
+    });
+  } catch (error) {
+    console.error('Announcement attachment upload failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}, (error, req, res, next) => {
+  if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ success: false, error: 'Announcement attachments must be 10 MB or smaller.' });
+  }
+  if (error instanceof multer.MulterError) {
+    return res.status(400).json({ success: false, error: 'Only PDF, XLS, DOC, and TXT announcement attachments are allowed.' });
+  }
+  next(error);
+});
+
 app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res) => {
   try {
     if (!req.file || !req.file.buffer) return res.status(400).json({ success: false, message: 'No file uploaded' });
@@ -514,6 +572,7 @@ app.post('/api/uploaded-images/delete', requireAdminKey, express.json(), deleteM
 
 // Serve uploaded images
 app.use('/uploads', express.static(uploadDir));
+app.use('/AnnouncementFiles', express.static(announcementFilesDir));
 app.use('/SlideshowImages', express.static(slideshowDir));
 app.get('/slideshow-images', (req, res) => {
   try {
@@ -564,6 +623,7 @@ app.post('/api/log-admin-action', requireAdminKey, (req, res) => {
 
 const DEFAULT_GAME_SCHEDULES = [{"id": "game-1", "date": "2026-04-26", "time": "08:00am", "park": "Carson - Calas Park", "division": "All", "team1": "Titans", "team2": "Primos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-2", "date": "2026-04-26", "time": "09:50am", "park": "Carson - Calas Park", "division": "All", "team1": "Dodgers", "team2": "Nasty Boyz", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-3", "date": "2026-04-26", "time": "11:45am", "park": "Carson - Calas Park", "division": "All", "team1": "Goodfellas", "team2": "Demons", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-4", "date": "2026-04-26", "time": "08:00am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Camaradas", "team2": "Desvelados", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-5", "date": "2026-04-26", "time": "09:50am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Diablos", "team2": "Toxic", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-6", "date": "2026-04-26", "time": "11:45am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Wild Hogz", "team2": "Strokes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-7", "date": "2026-04-26", "time": "08:00am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Legends", "team2": "Charros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-8", "date": "2026-04-26", "time": "09:50am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Salvajes", "team2": "Coyotes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-9", "date": "2026-04-26", "time": "11:45am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Caballeros", "team2": "Orioles", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-10", "date": "2026-04-26", "time": "01:45pm", "park": "Carson - Dolphin Park", "division": "All", "team1": "Doom Squad", "team2": "La Tribu", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-11", "date": "2026-04-26", "time": "08:00am", "park": "Carson - Veterans Park", "division": "All", "team1": "Bandits", "team2": "Naranjeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-12", "date": "2026-04-26", "time": "09:50am", "park": "Carson - Veterans Park", "division": "All", "team1": "White Sox", "team2": "Cubs", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-13", "date": "2026-04-26", "time": "11:45am", "park": "Carson - Veterans Park", "division": "All", "team1": "Dirt Bags", "team2": "Xolos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-14", "date": "2026-05-03", "time": "08:00am", "park": "Carson - Calas Park", "division": "All", "team1": "Demons", "team2": "Caballeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-15", "date": "2026-05-03", "time": "09:50am", "park": "Carson - Calas Park", "division": "All", "team1": "Dodgers", "team2": "Legends", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-16", "date": "2026-05-03", "time": "11:45am", "park": "Carson - Calas Park", "division": "All", "team1": "Nasty Boyz", "team2": "Doom Squad", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-17", "date": "2026-05-03", "time": "08:00am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Coyotes", "team2": "Naranjeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-18", "date": "2026-05-03", "time": "09:50am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Camaradas", "team2": "Xolos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-19", "date": "2026-05-03", "time": "11:45am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Orioles", "team2": "Bandits", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-20", "date": "2026-05-03", "time": "08:00am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Strokes", "team2": "Los Pericos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-21", "date": "2026-05-03", "time": "09:50am", "park": "Carson - Dolphin Park", "division": "All", "team1": "White Sox", "team2": "Primos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-22", "date": "2026-05-03", "time": "11:45am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Cubs", "team2": "Toxic", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-23", "date": "2026-05-03", "time": "08:00am", "park": "Carson - Veterans Park", "division": "All", "team1": "Charros", "team2": "La Tribu", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-24", "date": "2026-05-03", "time": "09:50am", "park": "Carson - Veterans Park", "division": "All", "team1": "Goodfellas", "team2": "Salvajes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-25", "date": "2026-05-03", "time": "11:45am", "park": "Carson - Veterans Park", "division": "All", "team1": "Desvelados", "team2": "Dirt Bags", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-26", "date": "2026-05-17", "time": "08:00am", "park": "Carson - Calas Park", "division": "All", "team1": "Orioles", "team2": "Salvajes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-27", "date": "2026-05-17", "time": "09:50am", "park": "Carson - Calas Park", "division": "All", "team1": "La Tribu", "team2": "Dodgers", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-28", "date": "2026-05-17", "time": "11:45am", "park": "Carson - Calas Park", "division": "All", "team1": "Xolos", "team2": "Wild Hogz", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-29", "date": "2026-05-17", "time": "08:00am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Diablos", "team2": "Legends", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-30", "date": "2026-05-17", "time": "09:50am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Caballeros", "team2": "Bandits", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-31", "date": "2026-05-17", "time": "11:45am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Nasty Boyz", "team2": "Cubs", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-32", "date": "2026-05-17", "time": "08:00am", "park": "Carson - Dolphin Park", "division": "All", "team1": "White Sox", "team2": "Doom Squad", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-33", "date": "2026-05-17", "time": "09:50am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Coyotes", "team2": "Demons", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-34", "date": "2026-05-17", "time": "11:45am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Goodfellas", "team2": "Naranjeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-35", "date": "2026-05-17", "time": "08:00am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Titans", "team2": "Charros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-36", "date": "2026-05-17", "time": "09:50am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Camaradas", "team2": "Strokes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-37", "date": "2026-05-17", "time": "11:45am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Desvelados", "team2": "Los Pericos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-38", "date": "2026-05-31", "time": "08:00am", "park": "Carson - Calas Park", "division": "All", "team1": "Coyotes", "team2": "Caballeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-39", "date": "2026-05-31", "time": "09:50am", "park": "Carson - Calas Park", "division": "All", "team1": "Bandits", "team2": "Salvajes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-40", "date": "2026-05-31", "time": "11:45am", "park": "Carson - Calas Park", "division": "All", "team1": "La Tribu", "team2": "Cubs", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-41", "date": "2026-05-31", "time": "08:00am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Dirt Bags", "team2": "Wild Hogz", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-42", "date": "2026-05-31", "time": "09:50am", "park": "Carson - Stevenson Park", "division": "All", "team1": "White Sox", "team2": "Diablos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-43", "date": "2026-05-31", "time": "11:45am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Orioles", "team2": "Goodfellas", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-44", "date": "2026-05-31", "time": "08:00am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Camaradas", "team2": "Los Pericos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-45", "date": "2026-05-31", "time": "09:50am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Doom Squad", "team2": "Titans", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-46", "date": "2026-05-31", "time": "11:45am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Nasty Boyz", "team2": "Charros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-47", "date": "2026-05-31", "time": "08:00am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Naranjeros", "team2": "Demons", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-48", "date": "2026-05-31", "time": "09:50am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Strokes", "team2": "Desvelados", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-49", "date": "2026-05-31", "time": "11:45am", "park": "Bell Gardens - Ford Park", "division": "All", "team1": "Legends", "team2": "Primos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-50", "date": "2026-06-07", "time": "08:00am", "park": "Carson - Calas Park", "division": "All", "team1": "Demons", "team2": "Salvajes", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-51", "date": "2026-06-07", "time": "09:50am", "park": "Carson - Calas Park", "division": "All", "team1": "Goodfellas", "team2": "Orioles", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-52", "date": "2026-06-07", "time": "11:45am", "park": "Carson - Calas Park", "division": "All", "team1": "Xolos", "team2": "Desvelados", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-53", "date": "2026-06-07", "time": "08:00am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Caballeros", "team2": "Naranjeros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-54", "date": "2026-06-07", "time": "09:50am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Coyotes", "team2": "Bandits", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-55", "date": "2026-06-07", "time": "11:45am", "park": "Carson - Stevenson Park", "division": "All", "team1": "Nasty Boyz", "team2": "Primos", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-56", "date": "2026-06-07", "time": "08:00am", "park": "Carson - Dolphin Park", "division": "All", "team1": "White Sox", "team2": "Charros", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-57", "date": "2026-06-07", "time": "09:50am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Titans", "team2": "Dodgers", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-58", "date": "2026-06-07", "time": "11:45am", "park": "Carson - Dolphin Park", "division": "All", "team1": "Camaradas", "team2": "Wild Hogz", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-59", "date": "2026-06-07", "time": "08:00am", "park": "Carson - Veterans Park", "division": "All", "team1": "Toxic", "team2": "Doom Squad", "score1": "", "score2": "", "status": "scheduled"}, {"id": "game-60", "date": "2026-06-07", "time": "09:50am", "park": "Carson - Veterans Park", "division": "All", "team1": "Dirt Bags", "team2": "Los Pericos", "score1": "", "score2": "", "status": "scheduled"}];
 const DEFAULT_TEAMS_BY_DIVISION = {"A": ["Titans", "La Tribu", "Nasty Boyz", "Toxic", "White Sox", "Legends"], "B": ["Cubs", "Primos", "Dodgers", "Diablos", "Charros", "Doom Squad"], "C": ["Demons", "Naranjeros", "Caballeros", "Salvajes", "Coyotes", "Bandits", "Orioles", "Goodfellas"], "D": ["Strokes", "Dirt Bags", "Camaradas", "Wild Hogz", "Los Pericos", "Xolos", "Desvelados"], "E": []};
+const DEFAULT_PARKS = ["Bell Gardens - Ford Park", "Carson - Stevenson Park", "Carson - Dolphin Park", "Carson - Calas Park", "Carson - Veterans Park", "Whittier - Sorensen Park"];
 function buildDefaultStandings() {
   const standings = {};
   Object.entries(DEFAULT_TEAMS_BY_DIVISION).forEach(([division, teams]) => {
@@ -620,10 +680,14 @@ function normalizeContent(raw) {
   if (!Array.isArray(content.practiceSchedules)) content.practiceSchedules = [];
   if (!Array.isArray(content.slideshow)) content.slideshow = [];
   if (!Array.isArray(content.eventFundraiserImages)) content.eventFundraiserImages = [];
+  if (!Array.isArray(content.parks) || content.parks.length === 0) content.parks = DEFAULT_PARKS.slice();
+  content.parks = [...new Set(content.parks.map(park => String(park || '').trim()).filter(Boolean))];
   if (!content.rosters || typeof content.rosters !== 'object' || Array.isArray(content.rosters)) content.rosters = {};
   if (!content.teamPlayers || typeof content.teamPlayers !== 'object' || Array.isArray(content.teamPlayers)) content.teamPlayers = {};
   if (!content.teamPhotos || typeof content.teamPhotos !== 'object' || Array.isArray(content.teamPhotos)) content.teamPhotos = {};
   content.standings = chooseStandings(content.gameSchedules, content.standings);
+  if (!content.manualStandings || typeof content.manualStandings !== 'object' || Array.isArray(content.manualStandings)) content.manualStandings = {};
+  content.manualStandingsEnabled = Boolean(content.manualStandingsEnabled);
   if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
   if (typeof content.homepageMessage !== 'string') content.homepageMessage = '';
   return content;
