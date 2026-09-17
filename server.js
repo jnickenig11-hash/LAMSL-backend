@@ -9,7 +9,7 @@ import net from 'net';
 import tls from 'tls';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 app.use(cors());
 
 // LAMSL no-store: dynamic API/file listing responses must not be cached by browsers/CDNs.
