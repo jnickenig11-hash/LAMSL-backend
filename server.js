@@ -551,6 +551,35 @@ app.post('/api/upload-payment-qr', requireAdminKey, paymentQrUpload.single('qr')
   next(error);
 });
 
+app.post('/api/delete-payment-qr', requireAdminKey, express.json(), (req, res) => {
+  try {
+    const provider = String(req.body?.provider || '').toLowerCase();
+    if (!['paypal', 'zelle', 'venmo'].includes(provider)) return res.status(400).json({ success: false, error: 'Invalid provider' });
+    const content = readContent();
+    const zelle = content.zelle && typeof content.zelle === 'object' && !Array.isArray(content.zelle) ? content.zelle : {};
+    const qrCodes = zelle.qrCodes && typeof zelle.qrCodes === 'object' && !Array.isArray(zelle.qrCodes) ? { ...zelle.qrCodes } : {};
+    delete qrCodes[provider];
+    if (provider === 'zelle') delete zelle.qrImage;
+    content.zelle = { ...zelle, qrCodes };
+    let deletedFiles = 0;
+    try {
+      fs.readdirSync(paymentQrDir)
+        .filter(name => new RegExp(`^${provider}-.*\\.(png|jpe?g|gif|webp)$`, 'i').test(name))
+        .forEach(name => {
+          fs.unlinkSync(path.join(paymentQrDir, name));
+          deletedFiles += 1;
+        });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    content.updatedAt = new Date().toISOString();
+    writeContent(content);
+    res.json({ success: true, provider, deletedFiles, zelle: content.zelle });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 function getManagedImageInfo(body = {}) {
   const destination = getImageDestination({ body });
   const raw = String(body.filename || body.name || body.path || body.url || '').trim();
