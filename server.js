@@ -493,6 +493,47 @@ app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res
   }
 });
 
+const paymentQrDir = path.join(persistentRoot, 'PaymentQR');
+app.use('/PaymentQR', express.static(paymentQrDir));
+const paymentQrUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(path.extname(file.originalname || '').toLowerCase()))
+});
+
+app.post('/api/upload-payment-qr', requireAdminKey, paymentQrUpload.single('qr'), (req, res) => {
+  try {
+    const provider = String(req.body.provider || '').toLowerCase();
+    if (!['paypal', 'zelle', 'venmo'].includes(provider)) return res.status(400).json({ success: false, error: 'Invalid provider' });
+    if (!req.file || !req.file.buffer) return res.status(400).json({ success: false, error: 'No valid image uploaded' });
+    const buffer = req.file.buffer;
+    const isPng = buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const isJpeg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    const isGif = buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6));
+    const isWebp = buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+    if (!isPng && !isJpeg && !isGif && !isWebp) return res.status(400).json({ success: false, error: 'The selected file is not a valid PNG, JPG, GIF, or WebP image.' });
+    const ext = (path.extname(req.file.originalname || '').toLowerCase().replace(/[^.a-z0-9]/g, '')) || '.png';
+    const filename = `${provider}-${Date.now()}${ext}`;
+    writeUploadedImage(req.file.buffer, paymentQrDir, filename);
+    const url = '/PaymentQR/' + filename;
+    const content = readContent();
+    if (!content.zelle || typeof content.zelle !== 'object' || Array.isArray(content.zelle)) content.zelle = {};
+    content.zelle.qrCodes = Object.assign({}, content.zelle.qrCodes, { [provider]: url });
+    content.updatedAt = new Date().toISOString();
+    writeContent(content);
+    res.json({ success: true, provider, url, zelle: content.zelle });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+}, (error, req, res, next) => {
+  if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ success: false, error: 'QR images must be 10 MB or smaller.' });
+  }
+  if (error instanceof multer.MulterError) {
+    return res.status(400).json({ success: false, error: 'Choose a PNG, JPG, GIF, or WebP image.' });
+  }
+  next(error);
+});
 
 function getManagedImageInfo(body = {}) {
   const destination = getImageDestination({ body });
