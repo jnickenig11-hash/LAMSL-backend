@@ -495,6 +495,22 @@ app.post('/api/upload-image', requireAdminKey, upload.single('image'), (req, res
 
 const paymentQrDir = path.join(persistentRoot, 'PaymentQR');
 app.use('/PaymentQR', express.static(paymentQrDir));
+function getPaymentQrCodesFromStorage() {
+  const latestByProvider = {};
+  try {
+    fs.readdirSync(paymentQrDir)
+      .filter(name => /^(paypal|zelle|venmo)-.*\.(png|jpe?g|gif|webp)$/i.test(name))
+      .forEach(name => {
+        const provider = name.match(/^(paypal|zelle|venmo)-/i)?.[1]?.toLowerCase();
+        if (!provider) return;
+        const modifiedAt = fs.statSync(path.join(paymentQrDir, name)).mtimeMs;
+        if (!latestByProvider[provider] || modifiedAt > latestByProvider[provider].modifiedAt) {
+          latestByProvider[provider] = { url: '/PaymentQR/' + name, modifiedAt };
+        }
+      });
+  } catch (error) {}
+  return Object.fromEntries(Object.entries(latestByProvider).map(([provider, image]) => [provider, image.url]));
+}
 const paymentQrUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -885,8 +901,13 @@ function getMergedEventFundraiserImages(content) {
 
 app.get('/api/content', (req, res) => {
   const content = readContent();
+  const qrCodes = { ...getPaymentQrCodesFromStorage() };
+  Object.entries(content.zelle?.qrCodes || {}).forEach(([provider, url]) => {
+    if (url) qrCodes[provider] = url;
+  });
   res.json({
     ...content,
+    zelle: { ...(content.zelle || {}), qrCodes },
     slideshow: getMergedHomepageSlideshow(content),
     eventFundraiserImages: getMergedEventFundraiserImages(content),
     deploymentVersion: '2026.06.05-stability-single-source-v1'
@@ -898,6 +919,10 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
     const current = loadContent();
     const previousScheduleSignature = scheduleSignature(current);
     const incoming = req.body && typeof req.body === 'object' ? req.body : {};
+    const currentZelle = current.zelle && typeof current.zelle === 'object' && !Array.isArray(current.zelle) ? current.zelle : {};
+    const incomingZelle = incoming.zelle && typeof incoming.zelle === 'object' && !Array.isArray(incoming.zelle) ? incoming.zelle : null;
+    const currentQrCodes = currentZelle.qrCodes && typeof currentZelle.qrCodes === 'object' && !Array.isArray(currentZelle.qrCodes) ? currentZelle.qrCodes : {};
+    const incomingQrCodes = incomingZelle?.qrCodes && typeof incomingZelle.qrCodes === 'object' && !Array.isArray(incomingZelle.qrCodes) ? incomingZelle.qrCodes : {};
     const next = {
       ...current,
       ...incoming,
@@ -909,7 +934,7 @@ app.post('/api/update', requireAdminKey, async (req, res) => {
       teamPlayers: incoming.teamPlayers && typeof incoming.teamPlayers === 'object' ? incoming.teamPlayers : (current.teamPlayers || {}),
       teamPhotos: incoming.teamPhotos && typeof incoming.teamPhotos === 'object' ? incoming.teamPhotos : (current.teamPhotos || {}),
       announcements: Array.isArray(incoming.announcements) ? incoming.announcements : (current.announcements || []),
-      zelle: incoming.zelle && typeof incoming.zelle === 'object' ? incoming.zelle : (current.zelle || {}),
+      zelle: incomingZelle ? { ...currentZelle, ...incomingZelle, qrCodes: { ...currentQrCodes, ...incomingQrCodes } } : currentZelle,
       homepageMessage: Object.prototype.hasOwnProperty.call(incoming, 'homepageMessage') ? incoming.homepageMessage : (current.homepageMessage || '')
     };
 
